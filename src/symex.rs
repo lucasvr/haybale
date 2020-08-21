@@ -1489,6 +1489,125 @@ where
         }
     }
 
+    // TODO: Error handling. For now panic on any failure
+    // Assumptions:
+    // - format of the output MIR is that of rust nightly 2020-06-03,
+    // - absence of non-ascii chars in function and filenames
+    // - compilation included debug information (e.g. debug=true in Cargo.toml used to create
+    //   bitcode)
+    fn get_trait_method_from_debug_loc(&self, location: &Location) -> (String, String) {
+        use glob::glob;
+        use regex::Regex;
+        let debug_loc = location.source_loc.unwrap();
+        println!("location: {:?}", location);
+        // TODO: use chars().take() instead of byte indexing everywhere
+        let mir_path_str_base: String = location
+            .module
+            .name
+            .chars()
+            .take(location.module.name.rfind('/').unwrap())
+            .collect();
+        println!("mir_path_str_base: {:?}", mir_path_str_base);
+        let demangled = rustc_demangle::try_demangle(&location.func.name)
+            .unwrap()
+            .to_string();
+        let colon_idx = demangled.find(":").unwrap();
+        let crate_name = demangled[..colon_idx].to_string();
+        let glob_pattern = "/**/*.mir";
+        let paths = glob(&[&mir_path_str_base, glob_pattern].concat())
+            .unwrap()
+            .map(|x| x.unwrap());
+        //at this point, paths contains an iterator of mir files (one per crate). We need to find
+        //the appropriate mir file.
+        /*
+        let mut filtered_paths = paths.filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains(&crate_name)
+        });
+        let mir_path = filtered_paths.next().unwrap();
+        println!("mir_path: {:?}", mir_path);
+        assert!(filtered_paths.next().is_none()); // dont want multiple matches now, if so could be ambiguity
+        */
+        let mut line_str = debug_loc.filename.clone()
+            + ":"
+            + &debug_loc.line.to_string()
+            + ":"
+            + &debug_loc.col.unwrap().to_string();
+        // TODO: for reasons I do not yet understand, sometimes debug_loc.filename is an absolute path,
+        // and sometimes it is a relative path. It seems that when debug_loc.directory.is_some(),
+        // it is a relative path.
+        if line_str.contains("/home/hudson/tock/") {
+            line_str = line_str[18..].to_string();
+        }
+        // for now, assume that "dyn SomeText as" always means SomeText is our trait
+        let regex = Regex::new(r"dyn [^\s]* as ").unwrap();
+        println!("line_str: {:?}", line_str);
+        for mir_path in paths {
+            //println!("scanning {:?}", mir_path);
+            use std::io::Read;
+            let mut mir_file = std::fs::File::open(&mir_path).unwrap();
+            let mut mir_string = String::new();
+            mir_file.read_to_string(&mut mir_string).ok();
+            let lines = mir_string.lines();
+            let mut relevant = lines.filter(|l| l.contains(&line_str) && regex.is_match(l));
+            let try_match = relevant.next();
+            //lifetimes are annoying so everything is in the loop
+            if try_match.is_some() {
+                assert!(relevant.next().is_none()); //only want a single match
+                let matched = try_match.unwrap();
+                let char_match = regex.find(matched).unwrap();
+                let trait_substr = &matched[char_match.start() + 4..char_match.end() - 4];
+                let second_trait_substr =
+                    &matched[char_match.end()..char_match.end() + trait_substr.len()];
+                assert!(trait_substr == second_trait_substr);
+                assert!(
+                    &matched[char_match.end() + trait_substr.len()
+                        ..char_match.end() + trait_substr.len() + 3]
+                        == ">::"
+                );
+                //assume will always have form "dyn SomeText as SomeText>::functext
+                let regex2 = Regex::new(r"[a-zA-Z0-9_]*").unwrap();
+                let char_match2 = regex2
+                    .find(&matched[char_match.end() + trait_substr.len() + 3..])
+                    .unwrap();
+                let fn_name = &matched[char_match.end() + trait_substr.len() + 3
+                    ..char_match.end() + trait_substr.len() + 3 + char_match2.end()];
+                println!(
+                    "TRAIT FOUND: {:?}, FUNCTION FOUND: {:?}",
+                    trait_substr, fn_name
+                );
+                return (trait_substr.to_string(), fn_name.to_string());
+            }
+        }
+        panic!("no match in mir");
+
+        /*
+         // code for extracting source lines, not useful in reality
+        let source_path = debug_loc.directory.clone().unwrap().to_string() + &debug_loc.filename;
+        let path = std::path::Path::new(&source_path);
+        let display = path.display();
+
+        // Open the path in read-only mode
+        let mut file = match std::fs::File::open(&path) {
+            Err(why) => panic!("couldn't open {}: {}", display, why),
+            Ok(file) => file,
+        };
+
+        let mut s = String::new();
+        file.read_to_string(&mut s).ok();
+        let mut lines = s.lines();
+        let source_line = lines.nth(debug_loc.line as usize).unwrap();
+        source_line.to_string() // delete me
+        */
+    }
+
+    // Hudson TODO: This function has been modified to always pick the longest path in LLVM IR when
+    // resolving a function. Ideally, it would only do so when the config instructs that behavior.
+    // Also, ideally, it would treat this as a branch and trace all possible implementations of a
+    // given trait method. That is probably a harder change.
     #[allow(clippy::if_same_then_else)] // in this case, having some identical `if` blocks actually improves readability, I think
     fn resolve_function(
         &mut self,
@@ -1503,12 +1622,24 @@ where
                 _ => panic!("Expected only a GlobalReference here because of earlier check"),
             },
             Either::Right(operand) => {
-                match self.state.interpret_as_function_ptr(self.state.operand_to_bv(&operand)?, 1)? {
-                    PossibleSolutions::AtLeast(_) => return Err(Error::OtherError("calling a function pointer which has multiple possible targets".to_owned())),  // there must be at least 2 targets since we passed n==1 to `interpret_as_function_ptr`
-                    PossibleSolutions::Exactly(v) => match v.iter().next() {
-                        None => return Err(Error::Unsat),  // no valid solutions for the function pointer
-                        Some(Callable::LLVMFunction(f)) => Either::Left(&f.name),
-                        Some(Callable::FunctionHook(h)) => Either::Right(h.clone()),
+                match self.state.interpret_as_function_ptr(self.state.operand_to_bv(&operand)?, 1) {
+                    Err(_e) => {
+                    // TODO: match to verify err
+                        let (trait_name, func_name) = self.get_trait_method_from_debug_loc(&self.state.cur_loc);
+                        // TODO: Verify that reusing project here is okay. I think it should be.
+                        let concrete_func = crate::dyn_dispatch::longest_path_dyn_dispatch(self.project, &func_name, &trait_name);
+                        println!("Concrete function: {:?}", concrete_func);
+                        Either::Left(&concrete_func.unwrap())
+                    }
+                    Ok(soln) => {
+                        match soln {
+                            PossibleSolutions::AtLeast(_) => return Err(Error::OtherError("calling a function pointer which has multiple possible targets".to_owned())),  // there must be at least 2 targets since we passed n==1 to `interpret_as_function_ptr`
+                            PossibleSolutions::Exactly(v) => match v.iter().next() {
+                                None => return Err(Error::Unsat),  // no valid solutions for the function pointer
+                                Some(Callable::LLVMFunction(f)) => Either::Left(&f.name),
+                                Some(Callable::FunctionHook(h)) => Either::Right(h.clone()),
+                            }
+                        }
                     }
                 }
             },
@@ -3094,7 +3225,7 @@ mod tests {
             loop_bound: 5,
             ..Config::default()
         };
-        let mut paths: Vec<Path> = PathIterator::<DefaultBackend>::new(funcname, &proj, config, None)
+        let mut paths: Vec<Path> = PathIterator::<DefaultBackend>::new(funcname, &proj, config)
             .collect::<Result<Vec<Path>>>()
             .unwrap_or_else(|r| panic!("{}", r));
         paths.sort();
@@ -3147,7 +3278,7 @@ mod tests {
             loop_bound: 5,
             ..Config::default()
         };
-        let mut paths: Vec<Path> = PathIterator::<DefaultBackend>::new(funcname, &proj, config, None)
+        let mut paths: Vec<Path> = PathIterator::<DefaultBackend>::new(funcname, &proj, config)
             .collect::<Result<Vec<Path>>>()
             .unwrap_or_else(|r| panic!("{}", r));
         paths.sort();

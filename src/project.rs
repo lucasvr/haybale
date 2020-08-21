@@ -12,6 +12,7 @@ use std::path::Path;
 
 /// A `Project` is a collection of LLVM code to be explored,
 /// consisting of one or more LLVM modules.
+#[derive(Clone)]
 pub struct Project {
     modules: Vec<Module>,
     pointer_size_bits: u32,

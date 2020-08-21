@@ -36,6 +36,7 @@ pub mod callbacks;
 pub mod cell_memory;
 mod demangling;
 mod double_keyed_map;
+mod dyn_dispatch;
 pub mod function_hooks;
 mod global_allocations;
 pub mod hook_utils;
@@ -53,6 +54,9 @@ use solver_utils::PossibleSolutions;
 
 #[cfg(test)]
 mod test_utils;
+
+#[macro_use]
+extern crate lazy_static;
 
 /// A simple enum describing either an integer value or a pointer
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -159,7 +163,7 @@ pub fn find_zero_of_func<'p>(
                     found = true;
                     break;
                 }
-            },
+            }
             Err(Error::LoopBoundExceeded(_)) => continue, // ignore paths that exceed the loop bound, keep looking
             Err(e) => return Err(em.state().full_error_message_with_context(e)),
         }
@@ -256,13 +260,13 @@ pub fn get_possible_return_values_of_func<'p>(
                 if candidate_values.len() > n {
                     break;
                 }
-            },
+            }
             Ok(ReturnValue::Abort) => {
                 candidate_values.insert(ReturnValue::Abort);
                 if candidate_values.len() > n {
                     break;
                 }
-            },
+            }
             Ok(ReturnValue::Return(bvretval)) => {
                 assert_eq!(bvretval.get_width(), return_width);
                 let state = em.mut_state();
@@ -283,16 +287,16 @@ pub fn get_possible_return_values_of_func<'p>(
                         if candidate_values.len() > n {
                             break;
                         }
-                    },
+                    }
                     PossibleSolutions::AtLeast(v) => {
                         candidate_values.extend(
                             v.iter()
                                 .map(|bvsol| ReturnValue::Return(bvsol.as_u64().unwrap())),
                         );
                         break; // the total must be over n at this point
-                    },
+                    }
                 };
-            },
+            }
             Ok(ReturnValue::Throw(bvptr)) => {
                 let state = em.mut_state();
                 match thrown_size {
@@ -304,7 +308,7 @@ pub fn get_possible_return_values_of_func<'p>(
                                 break;
                             }
                         }
-                    },
+                    }
                     Some(thrown_size) => {
                         let thrown_value = state.read(&bvptr, thrown_size).unwrap();
                         // rule out all the thrown values we already have - we're interested in new values
@@ -327,18 +331,18 @@ pub fn get_possible_return_values_of_func<'p>(
                                 if candidate_values.len() > n {
                                     break;
                                 }
-                            },
+                            }
                             PossibleSolutions::AtLeast(v) => {
                                 candidate_values.extend(
                                     v.iter()
                                         .map(|bvsol| ReturnValue::Throw(bvsol.as_u64().unwrap())),
                                 );
                                 break; // the total must be over n at this point
-                            },
+                            }
                         }
-                    },
+                    }
                 }
-            },
+            }
         }
     }
     if candidate_values.len() > n {
