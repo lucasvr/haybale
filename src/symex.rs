@@ -1542,7 +1542,8 @@ where
         if line_str.contains("/home/hudson/tock/") {
             line_str = line_str[18..].to_string();
         }
-        // for now, assume that "dyn SomeText as" always means SomeText is our trait
+        // for now, assume that "dyn SomeTextA as SomeTextB" means SomeTextB is our trait
+        // Usually, SomeTextA == SomeTextB, but for nested traits that can be false
         let regex = Regex::new(r"dyn [^\s]* as ").unwrap();
         println!("line_str: {:?}", line_str);
         for mir_path in paths {
@@ -1560,48 +1561,30 @@ where
                 let matched = try_match.unwrap();
                 let char_match = regex.find(matched).unwrap();
                 let trait_substr = &matched[char_match.start() + 4..char_match.end() - 4];
+                let gt_position = &matched[char_match.end()..].find(">").unwrap();
                 let second_trait_substr =
-                    &matched[char_match.end()..char_match.end() + trait_substr.len()];
-                assert!(trait_substr == second_trait_substr);
+                    &matched[char_match.end()..char_match.end() + gt_position];
+                println!("matched: {:?}", matched);
+                println!("1: {:?}, 2: {:?}", trait_substr, second_trait_substr);
                 assert!(
-                    &matched[char_match.end() + trait_substr.len()
-                        ..char_match.end() + trait_substr.len() + 3]
+                    &matched[char_match.end() + gt_position..char_match.end() + gt_position + 3]
                         == ">::"
                 );
-                //assume will always have form "dyn SomeText as SomeText>::functext
+                //assume will always have form "dyn SomeText as SomeTextB>::functext
                 let regex2 = Regex::new(r"[a-zA-Z0-9_]*").unwrap();
                 let char_match2 = regex2
-                    .find(&matched[char_match.end() + trait_substr.len() + 3..])
+                    .find(&matched[char_match.end() + gt_position + 3..])
                     .unwrap();
-                let fn_name = &matched[char_match.end() + trait_substr.len() + 3
-                    ..char_match.end() + trait_substr.len() + 3 + char_match2.end()];
+                let fn_name = &matched[char_match.end() + gt_position + 3
+                    ..char_match.end() + gt_position + 3 + char_match2.end()];
                 println!(
                     "TRAIT FOUND: {:?}, FUNCTION FOUND: {:?}",
-                    trait_substr, fn_name
+                    second_trait_substr, fn_name
                 );
-                return (trait_substr.to_string(), fn_name.to_string());
+                return (second_trait_substr.to_string(), fn_name.to_string());
             }
         }
         panic!("no match in mir");
-
-        /*
-         // code for extracting source lines, not useful in reality
-        let source_path = debug_loc.directory.clone().unwrap().to_string() + &debug_loc.filename;
-        let path = std::path::Path::new(&source_path);
-        let display = path.display();
-
-        // Open the path in read-only mode
-        let mut file = match std::fs::File::open(&path) {
-            Err(why) => panic!("couldn't open {}: {}", display, why),
-            Ok(file) => file,
-        };
-
-        let mut s = String::new();
-        file.read_to_string(&mut s).ok();
-        let mut lines = s.lines();
-        let source_line = lines.nth(debug_loc.line as usize).unwrap();
-        source_line.to_string() // delete me
-        */
     }
 
     // Hudson TODO: This function has been modified to always pick the longest path in LLVM IR when
@@ -1901,7 +1884,11 @@ where
             log::Level::Info
         };
         log::log!(log_level, "Processing hook for {}", hooked_funcname);
+<<<<<<< HEAD
         match hook.call_hook(&mut self.state, call)? {
+=======
+        let ret = match hook.call_hook(&self.project, &mut self.state, call)? {
+>>>>>>> first working version of optimization that enforces that instances of dynamically dispatched trait methods do not call themselves. only very basic version tested; needs more testing
             ReturnValue::ReturnVoid => {
                 if self.state.type_of(call).as_ref() == &Type::VoidType {
                     Ok(ReturnValue::ReturnVoid)
@@ -1934,7 +1921,21 @@ where
             },
             ReturnValue::Throw(bvptr) => Ok(ReturnValue::Throw(bvptr)), // throwing is always OK and doesn't need to be checked against function type
             ReturnValue::Abort => Ok(ReturnValue::Abort), // aborting is always OK and doesn't need to be checked against function type
+        };
+
+        // at this point, a called hook has finished executing.
+        // check if the called hook was a trait object method call with detected recursion.
+        // if so, remove it from
+        // the global list of trait object method calls being executed.
+        let mut fake_recursion_store = crate::dyn_dispatch::FAKE_RECURSION_STORE
+            .try_lock()
+            .unwrap();
+        let removed = fake_recursion_store.remove(&hooked_funcname.to_string());
+        if removed {
+            println!("Removed {:?} from fake recursion store.", hooked_funcname);
         }
+
+        ret
     }
 
     /// Returns the `ReturnValue` representing the return value

@@ -12,7 +12,7 @@
 /// concrete function once we have found the longest.
 use crate::backend::*;
 use crate::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::result::Result;
 use std::string::String;
 use std::sync::Mutex;
@@ -75,8 +75,37 @@ fn find_longest_path<'p>(
 }
 
 lazy_static! {
+    /// This global is used for storing a mapping from trait/method names to
+    /// an already determined longest implementation of that trait method.
+    /// This is purely an optimization to avoid repeated lookups. I use a global
+    /// rather than a field on the project to avoid needing to add widespread lifetime
+    /// annotations on the project struct, which would make rebasing on master more
+    /// difficult.
     static ref TRAIT_OBJ_MAP: Mutex<HashMap<(String, String), String>> =
         { Mutex::new(HashMap::new()) };
+
+    /// This global is used to track the trait currently under analysis, to detect
+    /// the scenario (common in virtualizers in Tock) where the implementation of
+    /// a trait method makes the same method call on a trait object of the same type,
+    /// which would lead to an endless loop. By asserting that virtualizers in Tock never
+    /// call themselves, we circumvent this problem. The circumvention requires tracking the
+    /// trait under analysis whenever there is a trait with multiple implementations. Anytime
+    /// a trait method is analyzed, check if we are already currently analyzing that trait --
+    /// if we are, we have detected this problematic scenario, and do not retrace the method
+    /// currently under analysis. This approach is correct except in the case of recursive
+    /// calls to trait object methods where the trait object method calls an instance of
+    /// the same concrete function at runtime.
+    static ref TRAIT_UNDER_ANALYSIS: Mutex<HashSet<String>> =
+        { Mutex::new(HashSet::new()) };
+
+    /// Within a given trait method that we are finding the longest path instance of, stores all
+    /// concrete functions which symbolically could do the recursion we disallow in Tock
+    static ref DETECTED_RECURSION: Mutex<HashMap<(String, String), HashSet<String>>> = {Mutex::new(HashMap::new()) };
+
+    /// When a concrete instance of a trait method that calls itself is returned, store it in this map
+    /// until we are finished symbolically executing this concrete instance
+    pub(crate) static ref FAKE_RECURSION_STORE: Mutex<HashSet<String>> =
+        { Mutex::new(HashSet::new()) };
 }
 
 /// Return the longest possible path for a given method call on a trait object.
@@ -99,27 +128,32 @@ pub(crate) fn longest_path_dyn_dispatch<'p>(
         _ => {}
     }
     drop(map); //unlock mutex, this function can be called by itself
+
     let matches = project.all_functions().filter(|(f, _m)| {
         let demangled = rustc_demangle::try_demangle(&f.name);
         if demangled.is_err() {
             false
         } else {
             let demangled = demangled.unwrap().to_string();
-            //println!("demangled: {:?}", demangled);
             demangled.contains(method_name) && demangled.contains(trait_name)
         }
     });
     let num_matches = matches.count();
     // just filtering twice was the quickest way to get the count of matches without evaluating
-    // path length for any elements
+    // path length for any elements. Also, only do the extra lookup for duplicates here. Otherwise
+    // num_matches == 1 could happen when there are actually two concrete impls.
     let mut matches2 = project.all_functions().filter(|(f, _m)| {
         let demangled = rustc_demangle::try_demangle(&f.name);
         if demangled.is_err() {
             false
         } else {
             let demangled = demangled.unwrap().to_string();
-            //println!("demangled: {:?}", demangled);
-            demangled.contains(method_name) && demangled.contains(trait_name)
+            let fake_recursion_store = FAKE_RECURSION_STORE.try_lock().unwrap();
+            demangled.contains(method_name)
+                && demangled.contains(trait_name)
+                && !fake_recursion_store.contains(&f.name.to_string())
+            // if the fake recursion store contains this function name, we are within an
+            // execution of this function which we know should not call itself.
         }
     });
     let mut longest = 0;
@@ -128,26 +162,69 @@ pub(crate) fn longest_path_dyn_dispatch<'p>(
         // if num matches == 1, just return the function name without tracing it (optimization)
         longest_func_name = Some(&matches2.next().unwrap().0.name);
     } else {
+        println!("num_matches: {:?}", num_matches);
         for (f, _m) in matches2 {
+            let mut under_analysis_set = TRAIT_UNDER_ANALYSIS.try_lock().unwrap();
+
+            if under_analysis_set.contains(&f.name.to_string()) {
+                // recursive invocation of concrete function for trait obj call
+                // assume this particular method call is impossible.
+                // Put it in the set corresponding to the trait being analyzed
+                let mut detected_recursion = DETECTED_RECURSION.try_lock().unwrap();
+                let val = detected_recursion
+                    .entry((trait_name.to_string(), method_name.to_string()))
+                    .or_insert(HashSet::new());
+                val.insert(f.name.to_string().clone());
+                println!("STORING IN DETECTED RECURSION");
+                continue;
+            }
             let mut config: Config<DefaultBackend> = Config::default();
             config.null_pointer_checking = config::NullPointerChecking::None; // In the Tock kernel, we trust that Rust safety mechanisms prevent null pointer dereferences.
             config.loop_bound = 10; // default is 10, go higher to detect unbounded loops
             println!("tracing {:?}", f.name);
+            under_analysis_set.insert(f.name.to_string()); //store mangled name of the function we are tracing.
+            drop(under_analysis_set); // unlock mutex
             if let Some((len, _state)) = find_longest_path(&f.name, &project, config) {
                 if len > longest {
                     longest = len;
                     longest_func_name = Some(&f.name);
                 }
             }
+
+            let mut under_analysis_set = TRAIT_UNDER_ANALYSIS.try_lock().unwrap();
+            assert!(under_analysis_set.remove(&f.name.to_string())); //assert so we panic if it wasnt there, which would be an error
         }
         println!("longest match: {:?}", longest_func_name.unwrap());
     }
-    // Place the found longest match in the map to prevent repeating the work for future lookups
-    let mut map = TRAIT_OBJ_MAP.try_lock().unwrap();
-    map.insert(
-        (method_name.to_string(), trait_name.to_string()),
-        longest_func_name.unwrap().to_string(),
-    );
+
+    let detected_recursion = DETECTED_RECURSION.try_lock().unwrap();
+    let skip_opt = if detected_recursion
+        .get(&(trait_name.to_string(), method_name.to_string()))
+        .map_or(false, |set| set.contains(longest_func_name.unwrap()))
+    {
+        let mut fake_recursion_store = FAKE_RECURSION_STORE.try_lock().unwrap();
+        fake_recursion_store.insert(longest_func_name.unwrap().to_string());
+        if longest_func_name.unwrap().contains("next") {
+            //santity check, TODO: better solution
+            panic!("ERROR: Iterator methods must be chainable.");
+        }
+        // unfortunately this optimization breaks my hack for avoiding the recursion once
+        // the concrete function is returned.
+        true
+    } else {
+        false
+    };
+
+    if !skip_opt {
+        // Place the found longest match in the map to prevent repeating the work for future lookups
+        let mut map = TRAIT_OBJ_MAP.try_lock().unwrap();
+        map.insert(
+            (method_name.to_string(), trait_name.to_string()),
+            longest_func_name.unwrap().to_string(),
+        );
+    } else {
+        println!("Skipping save optimization, executing concrete function with recursion");
+    }
 
     Ok(longest_func_name.unwrap())
 }
