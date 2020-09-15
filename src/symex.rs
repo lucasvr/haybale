@@ -1538,9 +1538,11 @@ where
             + &debug_loc.col.unwrap().to_string();
         // TODO: for reasons I do not yet understand, sometimes debug_loc.filename is an absolute path,
         // and sometimes it is a relative path. It seems that when debug_loc.directory.is_some(),
-        // it is a relative path.
-        if line_str.contains("/home/hudson/tock/") {
-            line_str = line_str[18..].to_string();
+        // it is a relative path. When it is an absolute path, I need to throw away the absolute
+        // portion of it in order to correctly match the strings in the MIR.
+        if line_str.starts_with("/") && line_str.contains("tock/") {
+            let idx = line_str.find("tock/").unwrap();
+            line_str = line_str[idx + 5..].to_string();
         }
         // for now, assume that "dyn SomeTextA as SomeTextB" means SomeTextB is our trait
         // Usually, SomeTextA == SomeTextB, but for nested traits that can be false

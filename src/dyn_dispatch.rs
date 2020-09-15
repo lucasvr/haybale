@@ -181,6 +181,9 @@ pub(crate) fn longest_path_dyn_dispatch<'p>(
             let mut config: Config<DefaultBackend> = Config::default();
             config.null_pointer_checking = config::NullPointerChecking::None; // In the Tock kernel, we trust that Rust safety mechanisms prevent null pointer dereferences.
             config.loop_bound = 10; // default is 10, go higher to detect unbounded loops
+            config
+                .function_hooks
+                .add_rust_demangled("kernel::debug::panic", &function_hooks::abort_hook);
             println!("tracing {:?}", f.name);
             under_analysis_set.insert(f.name.to_string()); //store mangled name of the function we are tracing.
             drop(under_analysis_set); // unlock mutex
