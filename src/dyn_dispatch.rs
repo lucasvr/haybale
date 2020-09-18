@@ -47,7 +47,8 @@ fn find_longest_path<'p>(
     project: &'p Project,
     config: Config<'p, DefaultBackend>,
 ) -> Option<(usize, State<'p, DefaultBackend>)> {
-    let mut em: ExecutionManager<DefaultBackend> = symex_function(funcname, project, config);
+    let mut em: ExecutionManager<DefaultBackend> =
+        symex_function(funcname, project, config, None).unwrap();
     //TODO: Following code could probably be more functional
     let mut longest_path_len = 0;
     let mut longest_path_state = None;
@@ -74,40 +75,6 @@ fn find_longest_path<'p>(
     longest_path_state.map_or(None, |state| Some((longest_path_len, state)))
 }
 
-lazy_static! {
-    /// This global is used for storing a mapping from trait/method names to
-    /// an already determined longest implementation of that trait method.
-    /// This is purely an optimization to avoid repeated lookups. I use a global
-    /// rather than a field on the project to avoid needing to add widespread lifetime
-    /// annotations on the project struct, which would make rebasing on master more
-    /// difficult.
-    static ref TRAIT_OBJ_MAP: Mutex<HashMap<(String, String), String>> =
-        { Mutex::new(HashMap::new()) };
-
-    /// This global is used to track the trait currently under analysis, to detect
-    /// the scenario (common in virtualizers in Tock) where the implementation of
-    /// a trait method makes the same method call on a trait object of the same type,
-    /// which would lead to an endless loop. By asserting that virtualizers in Tock never
-    /// call themselves, we circumvent this problem. The circumvention requires tracking the
-    /// trait under analysis whenever there is a trait with multiple implementations. Anytime
-    /// a trait method is analyzed, check if we are already currently analyzing that trait --
-    /// if we are, we have detected this problematic scenario, and do not retrace the method
-    /// currently under analysis. This approach is correct except in the case of recursive
-    /// calls to trait object methods where the trait object method calls an instance of
-    /// the same concrete function at runtime.
-    static ref TRAIT_UNDER_ANALYSIS: Mutex<HashSet<String>> =
-        { Mutex::new(HashSet::new()) };
-
-    /// Within a given trait method that we are finding the longest path instance of, stores all
-    /// concrete functions which symbolically could do the recursion we disallow in Tock
-    static ref DETECTED_RECURSION: Mutex<HashMap<(String, String), HashSet<String>>> = {Mutex::new(HashMap::new()) };
-
-    /// When a concrete instance of a trait method that calls itself is returned, store it in this map
-    /// until we are finished symbolically executing this concrete instance
-    pub(crate) static ref FAKE_RECURSION_STORE: Mutex<HashSet<String>> =
-        { Mutex::new(HashSet::new()) };
-}
-
 /// Return the longest possible path for a given method call on a trait object.
 /// TODO: Borrow config from existing run?
 pub(crate) fn longest_path_dyn_dispatch<'p>(
@@ -118,7 +85,7 @@ pub(crate) fn longest_path_dyn_dispatch<'p>(
     // First, check if we have already done a lookup for this trait method. For now use a global
     // for ease, though a field on the project would work better (but would require adding lots
     // of lifetime annotations).
-    let map = TRAIT_OBJ_MAP.try_lock().unwrap();
+    let map = project.trait_obj_map.try_lock().unwrap();
     let lookup = map.get(&(method_name.to_string(), trait_name.to_string()));
     match lookup {
         Some(s) => {
@@ -148,7 +115,7 @@ pub(crate) fn longest_path_dyn_dispatch<'p>(
             false
         } else {
             let demangled = demangled.unwrap().to_string();
-            let fake_recursion_store = FAKE_RECURSION_STORE.try_lock().unwrap();
+            let fake_recursion_store = project.fake_recursion_store.try_lock().unwrap();
             demangled.contains(method_name)
                 && demangled.contains(trait_name)
                 && !fake_recursion_store.contains(&f.name.to_string())
@@ -164,18 +131,18 @@ pub(crate) fn longest_path_dyn_dispatch<'p>(
     } else {
         println!("num_matches: {:?}", num_matches);
         for (f, _m) in matches2 {
-            let mut under_analysis_set = TRAIT_UNDER_ANALYSIS.try_lock().unwrap();
+            let mut under_analysis_set = project.trait_under_analysis.try_lock().unwrap();
 
             if under_analysis_set.contains(&f.name.to_string()) {
                 // recursive invocation of concrete function for trait obj call
                 // assume this particular method call is impossible.
                 // Put it in the set corresponding to the trait being analyzed
-                let mut detected_recursion = DETECTED_RECURSION.try_lock().unwrap();
+                let mut detected_recursion = project.detected_recursion.try_lock().unwrap();
                 let val = detected_recursion
                     .entry((trait_name.to_string(), method_name.to_string()))
                     .or_insert(HashSet::new());
                 val.insert(f.name.to_string().clone());
-                println!("STORING IN DETECTED RECURSION");
+                println!("STORING IN detected_recursion");
                 continue;
             }
             let mut config: Config<DefaultBackend> = Config::default();
@@ -194,18 +161,18 @@ pub(crate) fn longest_path_dyn_dispatch<'p>(
                 }
             }
 
-            let mut under_analysis_set = TRAIT_UNDER_ANALYSIS.try_lock().unwrap();
+            let mut under_analysis_set = project.trait_under_analysis.try_lock().unwrap();
             assert!(under_analysis_set.remove(&f.name.to_string())); //assert so we panic if it wasnt there, which would be an error
         }
         println!("longest match: {:?}", longest_func_name.unwrap());
     }
 
-    let detected_recursion = DETECTED_RECURSION.try_lock().unwrap();
+    let detected_recursion = project.detected_recursion.try_lock().unwrap();
     let skip_opt = if detected_recursion
         .get(&(trait_name.to_string(), method_name.to_string()))
         .map_or(false, |set| set.contains(longest_func_name.unwrap()))
     {
-        let mut fake_recursion_store = FAKE_RECURSION_STORE.try_lock().unwrap();
+        let mut fake_recursion_store = project.fake_recursion_store.try_lock().unwrap();
         fake_recursion_store.insert(longest_func_name.unwrap().to_string());
         if longest_func_name.unwrap().contains("next") {
             //santity check, TODO: better solution
@@ -220,7 +187,7 @@ pub(crate) fn longest_path_dyn_dispatch<'p>(
 
     if !skip_opt {
         // Place the found longest match in the map to prevent repeating the work for future lookups
-        let mut map = TRAIT_OBJ_MAP.try_lock().unwrap();
+        let mut map = project.trait_obj_map.try_lock().unwrap();
         map.insert(
             (method_name.to_string(), trait_name.to_string()),
             longest_func_name.unwrap().to_string(),
