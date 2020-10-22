@@ -12,10 +12,9 @@
 /// concrete function once we have found the longest.
 use crate::backend::*;
 use crate::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::result::Result;
 use std::string::String;
-use std::sync::Mutex;
 
 /// Returns the number of LLVM instructions in this path.
 /// A path is represented as a vector of `PathEntry`s, and

@@ -55,9 +55,6 @@ use solver_utils::PossibleSolutions;
 #[cfg(test)]
 mod test_utils;
 
-#[macro_use]
-extern crate lazy_static;
-
 /// A simple enum describing either an integer value or a pointer
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum SolutionValue {
@@ -140,14 +137,17 @@ pub fn find_zero_of_func<'p>(
     let returnwidth = match em.func().return_type.as_ref() {
         Type::VoidType => {
             return Err("find_zero_of_func: function has void type".into());
-        },
+        }
         ty => {
             let width = project
                 .size_in_bits(&ty)
                 .expect("Function return type shouldn't be an opaque struct type");
-            assert_ne!(width, 0, "Function return type has width 0 bits but isn't void type"); // void type was handled above
+            assert_ne!(
+                width, 0,
+                "Function return type has width 0 bits but isn't void type"
+            ); // void type was handled above
             width
-        },
+        }
     };
     let zero = em.state().zero(returnwidth);
     let mut found = false;
