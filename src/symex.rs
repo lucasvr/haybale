@@ -1634,7 +1634,7 @@ where
                     // TODO: match to verify err
                         let (trait_name, func_name) = self.get_trait_method_from_debug_loc(&self.state.cur_loc);
                         // TODO: Verify that reusing project here is okay. I think it should be.
-                        let concrete_func = crate::dyn_dispatch::longest_path_dyn_dispatch(self.project, &func_name, &trait_name);
+                        let concrete_func = crate::dyn_dispatch::longest_path_dyn_dispatch(self.project, self.state.config.clone(), &func_name, &trait_name);
                         println!("Concrete function: {:?}", concrete_func);
                         Either::Left(&concrete_func.unwrap())
                     }

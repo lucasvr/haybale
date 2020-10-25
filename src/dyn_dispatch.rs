@@ -41,13 +41,12 @@ fn get_path_length<'p>(path: &Vec<PathEntry<'p>>) -> usize {
 /// (in llvm IR "instructions") through that function, as well as a copy of the `State` of
 /// the execution manager at the conclusion of symbolically executing that path. Ties
 /// are broken at random.
-fn find_longest_path<'p>(
+fn find_longest_path<'p, B: Backend>(
     funcname: &str,
     project: &'p Project,
-    config: Config<'p, DefaultBackend>,
-) -> Option<(usize, State<'p, DefaultBackend>)> {
-    let mut em: ExecutionManager<DefaultBackend> =
-        symex_function(funcname, project, config, None).unwrap();
+    config: Config<'p, B>,
+) -> Option<(usize, State<'p, B>)> {
+    let mut em: ExecutionManager<B> = symex_function(funcname, project, config, None).unwrap();
     //TODO: Following code could probably be more functional
     let mut longest_path_len = 0;
     let mut longest_path_state = None;
@@ -75,9 +74,9 @@ fn find_longest_path<'p>(
 }
 
 /// Return the longest possible path for a given method call on a trait object.
-/// TODO: Borrow config from existing run?
-pub(crate) fn longest_path_dyn_dispatch<'p>(
+pub(crate) fn longest_path_dyn_dispatch<'p, B: Backend>(
     project: &'p Project,
+    config: Config<'p, B>,
     method_name: &str,
     trait_name: &str,
 ) -> Result<&'p str, String> {
@@ -144,16 +143,10 @@ pub(crate) fn longest_path_dyn_dispatch<'p>(
                 println!("STORING IN detected_recursion");
                 continue;
             }
-            let mut config: Config<DefaultBackend> = Config::default();
-            config.null_pointer_checking = config::NullPointerChecking::None; // In the Tock kernel, we trust that Rust safety mechanisms prevent null pointer dereferences.
-            config.loop_bound = 10; // default is 10, go higher to detect unbounded loops
-            config
-                .function_hooks
-                .add_rust_demangled("kernel::debug::panic", &function_hooks::abort_hook);
             println!("tracing {:?}", f.name);
             under_analysis_set.insert(f.name.to_string()); //store mangled name of the function we are tracing.
             drop(under_analysis_set); // unlock mutex
-            if let Some((len, _state)) = find_longest_path(&f.name, &project, config) {
+            if let Some((len, _state)) = find_longest_path(&f.name, &project, config.clone()) {
                 if len > longest {
                     longest = len;
                     longest_func_name = Some(&f.name);
