@@ -209,6 +209,35 @@ impl<'p> PathEntry<'p> {
     }
 }
 
+/// Returns the number of LLVM instructions in a passed path.
+/// The returned value is only accurate if the path under
+/// analysis does not include a panic, exception, exit,
+/// or any hooked calls (such as inline assembly).
+// A path is represented as a vector of `PathEntry`s, and
+// each `PathEntry` describes a sequential set of instructions in a basic block,
+// not necessarily starting at the beginning of that basic block.
+// When a `PathEntry` does not start at the beginning of a basic block, that means
+// we have returned to the basic block after a function call within that block.
+pub fn get_path_length<'p>(path: &Vec<PathEntry<'p>>) -> usize {
+    path.iter().fold(0, |acc, entry| {
+        let location = &entry.0;
+        let entry_len = match location.instr {
+            BBInstrIndex::Instr(0) => location.bb.instrs.len() + 1, // +1 for terminator
+            BBInstrIndex::Instr(_) => 0,                            // already counted
+            BBInstrIndex::Terminator => {
+                // Path with only a terminator: 1 instruction, not counted yet.
+                // Tail calls: we already counted the terminator, this is a duplicate bb
+                if location.bb.instrs.len() == 0 {
+                    1
+                } else {
+                    0
+                }
+            },
+        };
+        acc + entry_len
+    })
+}
+
 /// Fully describes a code location within the LLVM IR.
 #[derive(Clone)]
 pub struct Location<'p> {
@@ -1431,7 +1460,7 @@ where
                             .bvs_must_be_equal(&bv, &self.bv_from_u64(*addr, bv.get_width()))? =>
                     {
                         vec![*addr]
-                    },
+                    }
                     _ => {
                         // Ok, use `get_possible_solutions_for_bv()`
                         match self
@@ -2028,14 +2057,14 @@ where
                     if idx != 0 {
                         reenter_set.insert((path_entry.0.bb.name.clone(), idx - 1));
                     }
-                }
+                },
                 BBInstrIndex::Terminator => {
                     let num_instrs = path_entry.0.bb.instrs.len();
                     if num_instrs > 0 {
                         // call is last instruction in block
                         reenter_set.insert((path_entry.0.bb.name.clone(), num_instrs - 1));
                     }
-                }
+                },
             }
         }
         let mut path_str = String::new();
@@ -2053,23 +2082,22 @@ where
                                     broke_early = true;
                                     break;
                                 }
-                            }
-                            _ => {}
+                            },
+                            _ => {},
                         }
                     }
                     // add terminator, but only if we did not leave bb early bc of function call.
                     if !broke_early {
                         path_str.push_str(&format!("{}\n", location.bb.term));
                     }
-                }
+                },
                 BBInstrIndex::Terminator => {
                     path_str.push_str(&format!("{}\n", location.bb.term));
-                }
+                },
             }
         }
         path_str
     }
-
 
     /// returns a `String` containing a formatted view of the full path which led
     /// to this point, in terms of source locations
@@ -2289,7 +2317,7 @@ pub fn get_path_length<'p>(path: &Vec<PathEntry<'p>>) -> usize {
                 } else {
                     0
                 }
-            }
+            },
         };
         acc + entry_len
     })
