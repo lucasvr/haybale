@@ -209,35 +209,6 @@ impl<'p> PathEntry<'p> {
     }
 }
 
-/// Returns the number of LLVM instructions in a passed path.
-/// The returned value is only accurate if the path under
-/// analysis does not include a panic, exception, exit,
-/// or any hooked calls (such as inline assembly).
-// A path is represented as a vector of `PathEntry`s, and
-// each `PathEntry` describes a sequential set of instructions in a basic block,
-// not necessarily starting at the beginning of that basic block.
-// When a `PathEntry` does not start at the beginning of a basic block, that means
-// we have returned to the basic block after a function call within that block.
-pub fn get_path_length<'p>(path: &Vec<PathEntry<'p>>) -> usize {
-    path.iter().fold(0, |acc, entry| {
-        let location = &entry.0;
-        let entry_len = match location.instr {
-            BBInstrIndex::Instr(0) => location.bb.instrs.len() + 1, // +1 for terminator
-            BBInstrIndex::Instr(_) => 0,                            // already counted
-            BBInstrIndex::Terminator => {
-                // Path with only a terminator: 1 instruction, not counted yet.
-                // Tail calls: we already counted the terminator, this is a duplicate bb
-                if location.bb.instrs.len() == 0 {
-                    1
-                } else {
-                    0
-                }
-            },
-        };
-        acc + entry_len
-    })
-}
-
 /// Fully describes a code location within the LLVM IR.
 #[derive(Clone)]
 pub struct Location<'p> {

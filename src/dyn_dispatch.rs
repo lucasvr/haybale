@@ -34,10 +34,10 @@ fn find_longest_path<'p, B: Backend>(
             Some(res) => match res {
                 Ok(_) => {
                     println!("dyn_dispatch: {:?}, next() worked", funcname);
-                }
+                },
                 Err(e) => {
-                    panic!(em.state().full_error_message_with_context(e));
-                }
+                    panic!("{}", em.state().full_error_message_with_context(e));
+                },
             },
             None => break,
         }
@@ -68,8 +68,8 @@ pub(crate) fn longest_path_dyn_dispatch<'p, B: Backend>(
         Some(s) => {
             println!("Longest lookup match!");
             return Ok(project.get_func_by_name(s).unwrap().0.name.as_str());
-        }
-        _ => {}
+        },
+        _ => {},
     }
     drop(map); //unlock mutex, this function can be called by itself
 
