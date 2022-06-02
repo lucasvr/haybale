@@ -35,6 +35,15 @@ fn find_longest_path<'p, B: Backend>(
                 Ok(_) => {
                     println!("dyn_dispatch: {:?}, next() worked", funcname);
                 },
+                Err(Error::UnreachableInstruction) => {
+                    // Rust inserts unreachable assertions along paths that it knows will not be
+                    // reachable unless we violate Rust's memory/type safety. LLVM IR on its own
+                    // does not have enough information to know these paths will never be
+                    // reachable, so sometimes haybale will attempt to execute unreachable
+                    // instructions. We simply have to ignore all paths containing these
+                    // instructions.
+                    continue;
+                },
                 Err(e) => {
                     panic!("{}", em.state().full_error_message_with_context(e));
                 },

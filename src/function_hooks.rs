@@ -375,6 +375,7 @@ impl<'p, B: Backend + 'p> Default for FunctionHooks<'p, B> {
         fhooks.add_rust_demangled("std::panicking::begin_panic_fmt", &abort_hook);
         fhooks.add_rust_demangled("std::panicking::begin_panic_handler", &abort_hook);
         fhooks.add_rust_demangled("core::panicking::panic", &abort_hook);
+        fhooks.add_rust_demangled("core::panicking::panic_fmt", &abort_hook);
         fhooks.add_rust_demangled("core::panicking::panic_bounds_check", &abort_hook);
         fhooks.add_rust_demangled("core::result::unwrap_failed", &abort_hook);
         fhooks.add_rust_demangled("core::slice::slice_index_len_fail", &abort_hook);
@@ -461,7 +462,10 @@ pub fn generic_stub_hook<B: Backend>(
             let width = state.size_in_bits(ty).ok_or_else(|| {
                 Error::OtherError("Call return type is an opaque named struct".into())
             })?;
-            assert_ne!(width, 0, "Call return type has size 0 bits but isn't void type"); // void type was handled above
+            assert_ne!(
+                width, 0,
+                "Call return type has size 0 bits but isn't void type"
+            ); // void type was handled above
             let bv = state.new_bv_with_name(Name::from("generic_stub_hook_retval"), width)?;
             Ok(ReturnValue::Return(bv))
         },

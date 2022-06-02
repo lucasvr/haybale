@@ -1529,7 +1529,6 @@ where
             .chars()
             .take(location.module.name.rfind('/').unwrap())
             .collect();
-        println!("mir_path_str_base: {:?}", mir_path_str_base);
         let demangled = rustc_demangle::try_demangle(&location.func.name)
             .unwrap()
             .to_string();
