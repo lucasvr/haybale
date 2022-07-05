@@ -4,6 +4,7 @@ use llvm_ir::instruction::{BinaryOp, InlineAssembly};
 use llvm_ir::types::NamedStructDef;
 use llvm_ir::*;
 use log::{debug, info};
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt;
 
@@ -1610,10 +1611,11 @@ where
         panic!("no match in mir");
     }
 
-    // Hudson TODO: This function has been modified to always pick the longest path in LLVM IR when
-    // resolving a function. Ideally, it would only do so when the config instructs that behavior.
-    // Also, ideally, it would treat this as a branch and trace all possible implementations of a
-    // given trait method. That is probably a harder change.
+    // Hudson: This function has been modified to support picking the longest path in LLVM IR when
+    // resolving a function and encountering trait object method dispatch.
+    // Ideally, we would treat this as a branch and trace all possible implementations of a
+    // given trait method. That is probably a harder change, given such an approach is not
+    // supported for any function pointer types now.
     #[allow(clippy::if_same_then_else)] // in this case, having some identical `if` blocks actually improves readability, I think
     fn resolve_function(
         &mut self,
@@ -1629,7 +1631,10 @@ where
             },
             Either::Right(operand) => {
                 match self.state.interpret_as_function_ptr(self.state.operand_to_bv(&operand)?, 1) {
-                    Err(_e) => {
+                    Err(e) => {
+                        if !self.state.config.longest_path_optimizations {
+                            return Err(e);
+                        }
                     // TODO: match to verify err
                         let (trait_name, func_name) = self.get_trait_method_from_debug_loc(&self.state.cur_loc);
                         // TODO: Verify that reusing project here is okay. I think it should be.

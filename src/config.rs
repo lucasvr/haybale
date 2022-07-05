@@ -199,6 +199,12 @@ pub struct Config<'p, B: Backend> {
     ///
     /// Default is `true`.
     pub print_module_name: bool,
+
+    /// If `true`, then `haybale` will enable a collection of optimizations that are
+    /// valid if you are only using `haybale` to find the longest path (in LLVM IR
+    /// instructions) through the top level function. These optimizations are not sound
+    /// for other uses of Haybale.
+    pub longest_path_optimizations: bool,
 }
 
 /// Enum used for the `null_pointer_checking` option in `Config`.
@@ -301,6 +307,7 @@ impl<'p, B: Backend> Default for Config<'p, B> {
             demangling: None,
             print_source_info: true,
             print_module_name: true,
+            longest_path_optimizations: false,
         }
     }
 }
