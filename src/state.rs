@@ -64,10 +64,10 @@ pub struct State<'p, B: Backend> {
     /// We won't have a `StackFrame` for the current function here, only each of
     /// its callers. For instance, while we are executing the top-level function,
     /// this stack will be empty.
-    stack: Vec<StackFrame<'p, B::BV>>,
+    pub stack: Vec<StackFrame<'p, B::BV>>,
     /// These backtrack points are places where execution can be resumed later
     /// (efficiently, thanks to the incremental solving capabilities of Boolector).
-    backtrack_points: RefCell<Vec<BacktrackPoint<'p, B>>>,
+    pub backtrack_points: RefCell<Vec<BacktrackPoint<'p, B>>>,
     /// Log of the basic blocks which have been executed to get to this point
     path: Vec<PathEntry<'p>>,
     /// Memory watchpoints (segments of memory to log reads/writes of).
@@ -93,6 +93,17 @@ pub struct State<'p, B: Backend> {
     /// anyway, and function pointers _probably_ resolve to the same value on
     /// multiple paths.
     function_ptr_cache: HashMap<Location<'p>, u64>,
+    /// Most recent backtrack point that popped off the backtrack_points queue.
+    /// In the case of a solver timeout, it can be useful to retrieve this if we
+    /// want to try to make progress again with modified constraints, rather than
+    /// giving up entirely.
+    pub last_backtrack_point: Option<BacktrackPoint<'p, B>>,
+    /// Function which should be executed without any constraints if/when it is
+    /// encountered, denoted by the particular callsite pointing at this function
+    /// which should be executed unconstrained.
+    /// TODO: What to do about trait object dispatch affecting this approach? Realistically only
+    /// want to clear state for the appropriate trait implementation which failed last time.
+    pub fn_to_clear: Option<Callsite<'p>>,
 }
 
 /// Describes a location in LLVM IR in a format more suitable for printing - for
@@ -342,9 +353,9 @@ pub struct Callsite<'p> {
 }
 
 #[derive(PartialEq, Clone, Debug)]
-struct StackFrame<'p, V: BV> {
+pub struct StackFrame<'p, V: BV> {
     /// Indicates the call or invoke instruction which was responsible for the call
-    callsite: Callsite<'p>,
+    pub callsite: Callsite<'p>,
     /// Caller's local variables, so they can be restored when we return to the caller.
     /// This is necessary in the case of (direct or indirect) recursion.
     /// See notes on `VarMap.get_restore_info_for_fn()`.
@@ -352,13 +363,13 @@ struct StackFrame<'p, V: BV> {
 }
 
 #[derive(Clone)]
-struct BacktrackPoint<'p, B: Backend> {
+pub struct BacktrackPoint<'p, B: Backend> {
     /// Where to resume execution
     loc: Location<'p>,
     /// Call stack at the `BacktrackPoint`.
     /// This is a vector of `StackFrame`s where the first entry is the top-level
     /// caller, and the last entry is the caller of the `BacktrackPoint`'s function.
-    stack: Vec<StackFrame<'p, B::BV>>,
+    pub stack: Vec<StackFrame<'p, B::BV>>,
     /// Constraint to add before restarting execution at `next_bb`.
     /// (Intended use of this is to constrain the branch in that direction.)
     constraint: B::BV,
@@ -403,6 +414,7 @@ where
             config.demangling = Some(Demangling::autodetect(project));
         }
         let mut state = Self {
+            fn_to_clear: None,
             cur_loc: start_loc.clone(),
             pointer_size_bits: project.pointer_size_bits(),
             proj: project,
@@ -487,6 +499,7 @@ where
             path: Vec::new(),
             mem_watchpoints: config.initial_mem_watchpoints.clone().into_iter().collect(),
             function_ptr_cache: HashMap::new(),
+            last_backtrack_point: None,
 
             // listed last (out-of-order) so that they can be used above but moved in now
             solver,
@@ -585,6 +598,34 @@ where
         cloned.global_allocations.change_solver(new_solver.clone());
         cloned.solver = new_solver;
         cloned
+    }
+
+    /// Duplicate the `State` but replace the solver and varmap / mem / allocations
+    /// with fresh versions. This basically lets us keep the configuration / project
+    /// / stack / backtrack points but still quickly explore a subfunction without
+    /// the solver being slowed down by all of the constraints on input variables and global
+    /// memory.
+    pub fn fork_fresh(&self) -> Self {
+        let mut new_state = self.clone();
+        let new_solver = B::SolverRef::new();
+        let clone1 = new_solver.clone();
+        new_solver.set_opt(BtorOption::SolverTimeout(Some(std::time::Duration::new(
+            100, 0,
+        )))); // longer timeout in here? configurable
+        new_state.varmap = VarMap::new(new_solver, self.config.loop_bound);
+        new_state.mem = RefCell::new(Memory::new_uninitialized(
+            clone1,
+            match self.config.null_pointer_checking {
+                NullPointerChecking::Simple => true,
+                NullPointerChecking::SplitPath => true,
+                NullPointerChecking::None => false,
+            },
+            None,
+            self.proj.pointer_size_bits(),
+        ));
+        new_state.global_allocations = GlobalAllocations::new();
+        // TODO: Should I be resetting backtrack points on the new state?
+        new_state
     }
 
     /// Returns `true` if current constraints are satisfiable, `false` if not.
@@ -1431,7 +1472,7 @@ where
                             .bvs_must_be_equal(&bv, &self.bv_from_u64(*addr, bv.get_width()))? =>
                     {
                         vec![*addr]
-                    }
+                    },
                     _ => {
                         // Ok, use `get_possible_solutions_for_bv()`
                         match self
@@ -1940,6 +1981,7 @@ where
     pub fn revert_to_backtracking_point(&mut self) -> Result<bool> {
         if let Some(bp) = self.backtrack_points.borrow_mut().pop() {
             debug!("Reverting to backtracking point {}", bp);
+            let cached = bp.clone();
             self.solver.pop(1);
             self.varmap = bp.varmap;
             self.mem.replace(bp.mem);
@@ -1947,6 +1989,9 @@ where
             self.path.truncate(bp.path_len);
             self.cur_loc = bp.loc;
             bp.constraint.assert()?;
+            // This is the only place we pop off of the backtrack_points queue,
+            // so this ensures the last backtrack point is always stored.
+            self.last_backtrack_point = Some(cached);
             Ok(true)
         } else {
             Ok(false)
@@ -1975,7 +2020,7 @@ where
         }
         locdescrs
             .into_iter()
-            .zip(1 ..)
+            .zip(1..)
             .map(|(locdescr, framenum)| {
                 let pretty_locdescr = if self.config.print_module_name {
                     locdescr.to_string_with_module()

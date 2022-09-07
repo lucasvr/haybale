@@ -144,6 +144,7 @@ pub struct ExecutionManager<'p, B: Backend> {
     fresh: bool,
     /// The `squash_unsats` setting from `Config`
     squash_unsats: bool,
+    old_state: Option<State<'p, B>>,
 }
 
 impl<'p, B: Backend> ExecutionManager<'p, B> {
@@ -161,6 +162,7 @@ impl<'p, B: Backend> ExecutionManager<'p, B> {
             bvparams,
             fresh: true,
             squash_unsats,
+            old_state: None,
         }
     }
 
@@ -1321,6 +1323,19 @@ where
     ///
     /// If the returned value is `Ok(None)`, then we finished the call normally, and execution should continue from here.
     fn symex_call(&mut self, call: &'p instruction::Call) -> Result<Option<ReturnValue<B::BV>>> {
+        // Before we symex this function, check if this is a function we want to clear state before
+        // executing.
+        if self
+            .state
+            .fn_to_clear
+            .as_ref()
+            .map_or(false, |callsite| callsite.loc == self.state.cur_loc)
+        {
+            let new_state = self.state.fork_fresh();
+            assert!(self.old_state.is_none()); // prevent retry-within-retry
+            self.old_state = Some(self.state.clone());
+            self.state = new_state;
+        }
         debug!("Symexing call {:?}", call);
         match self.resolve_function(&call.function)? {
             ResolvedFunction::HookActive { hook, hooked_thing } => {
@@ -1340,7 +1355,9 @@ where
                     ReturnValue::ReturnVoid => {},
                     ReturnValue::Throw(bvptr) => {
                         debug!("Hook threw an exception, but caller isn't inside a try block; rethrowing upwards");
-                        return Ok(Some(ReturnValue::Throw(bvptr)));
+                        panic!("Hudson: Throw in Rust code?"); // Rust code should not contain exceptions so I am ignoring this
+                                                               // case
+                                                               //return Ok(Some(ReturnValue::Throw(bvptr)));
                     },
                     ReturnValue::Abort => return Ok(Some(ReturnValue::Abort)),
                 }
@@ -1361,6 +1378,9 @@ where
                         String::new()
                     }
                 );
+                self.old_state.take().map(|old| {
+                    self.state = old;
+                });
                 Ok(None)
             },
             ResolvedFunction::NoHookActive { called_funcname } => {
@@ -1390,6 +1410,9 @@ where
                                 .assign_bv_to_name(call.dest.as_ref().unwrap().clone(), bv)?;
                         },
                     }
+                    self.old_state.take().map(|old| {
+                        self.state = old;
+                    });
                     Ok(None)
                 } else if let Some((callee, callee_mod)) =
                     self.state.get_func_by_name(called_funcname)
@@ -1438,7 +1461,12 @@ where
                         .symex_from_cur_loc_through_end_of_function()?
                         .ok_or(Error::Unsat)?; // if symex_from_cur_loc_through_end_of_function() returns `None`, this path is unsat
                     match self.state.pop_callsite() {
-                        None => Ok(Some(returned_bv)), // if there was no callsite to pop, then we finished elsewhere. See notes on `symex_call()`
+                        None => {
+                            self.old_state.take().map(|old| {
+                                self.state = old;
+                            });
+                            Ok(Some(returned_bv))
+                        }, // if there was no callsite to pop, then we finished elsewhere. See notes on `symex_call()`
                         Some(ref callsite)
                             if callsite.loc == saved_loc && callsite.instr.is_left() =>
                         {
@@ -1456,9 +1484,15 @@ where
                                 ReturnValue::ReturnVoid => assert_eq!(call.dest, None),
                                 ReturnValue::Throw(bvptr) => {
                                     debug!("Callee threw an exception, but caller isn't inside a try block; rethrowing upwards");
-                                    return Ok(Some(ReturnValue::Throw(bvptr)));
+                                    panic!("Hudson: Aborting on Throw");
+                                    //return Ok(Some(ReturnValue::Throw(bvptr)));
                                 },
-                                ReturnValue::Abort => return Ok(Some(ReturnValue::Abort)),
+                                ReturnValue::Abort => {
+                                    self.old_state.take().map(|old| {
+                                        self.state = old;
+                                    });
+                                    return Ok(Some(ReturnValue::Abort));
+                                },
                             };
                             debug!("Completed ordinary return to caller");
                             info!(
@@ -1472,8 +1506,11 @@ where
                                     String::new()
                                 },
                             );
+                            self.old_state.take().map(|old| {
+                                self.state = old;
+                            });
                             Ok(None)
-                        }
+                        },
                         Some(callsite) => panic!("Received unexpected callsite {:?}", callsite),
                     }
                 } else {
@@ -1500,10 +1537,19 @@ where
                                 ReturnValue::ReturnVoid => {},
                                 ReturnValue::Throw(bvptr) => {
                                     debug!("Hook threw an exception, but caller isn't inside a try block; rethrowing upwards");
-                                    return Ok(Some(ReturnValue::Throw(bvptr)));
+                                    panic!("Hudson: aborting on throw");
+                                    //return Ok(Some(ReturnValue::Throw(bvptr)));
                                 },
-                                ReturnValue::Abort => return Ok(Some(ReturnValue::Abort)),
+                                ReturnValue::Abort => {
+                                    self.old_state.take().map(|old| {
+                                        self.state = old;
+                                    });
+                                    return Ok(Some(ReturnValue::Abort));
+                                },
                             }
+                            self.old_state.take().map(|old| {
+                                self.state = old;
+                            });
                             Ok(None)
                         },
                     }
@@ -1534,7 +1580,7 @@ where
             .unwrap()
             .to_string();
         let colon_idx = demangled.find(":").unwrap();
-        let crate_name = demangled[.. colon_idx].to_string();
+        let crate_name = demangled[..colon_idx].to_string();
         let glob_pattern = "/**/*.mir";
         let paths = glob(&[&mir_path_str_base, glob_pattern].concat())
             .unwrap()
@@ -1564,7 +1610,7 @@ where
         // portion of it in order to correctly match the strings in the MIR.
         if line_str.starts_with("/") && line_str.contains("tock/") {
             let idx = line_str.find("tock/").unwrap();
-            line_str = line_str[idx + 5 ..].to_string();
+            line_str = line_str[idx + 5..].to_string();
         }
         // for now, assume that "dyn SomeTextA as SomeTextB" means SomeTextB is our trait
         // Usually, SomeTextA == SomeTextB, but for nested traits that can be false
@@ -1584,23 +1630,23 @@ where
                 assert!(relevant.next().is_none()); //only want a single match
                 let matched = try_match.unwrap();
                 let char_match = regex.find(matched).unwrap();
-                let trait_substr = &matched[char_match.start() + 4 .. char_match.end() - 4];
-                let gt_position = &matched[char_match.end() ..].find(">").unwrap();
+                let trait_substr = &matched[char_match.start() + 4..char_match.end() - 4];
+                let gt_position = &matched[char_match.end()..].find(">").unwrap();
                 let second_trait_substr =
-                    &matched[char_match.end() .. char_match.end() + gt_position];
+                    &matched[char_match.end()..char_match.end() + gt_position];
                 println!("matched: {:?}", matched);
                 println!("1: {:?}, 2: {:?}", trait_substr, second_trait_substr);
                 assert!(
-                    &matched[char_match.end() + gt_position .. char_match.end() + gt_position + 3]
+                    &matched[char_match.end() + gt_position..char_match.end() + gt_position + 3]
                         == ">::"
                 );
                 //assume will always have form "dyn SomeText as SomeTextB>::functext
                 let regex2 = Regex::new(r"[a-zA-Z0-9_]*").unwrap();
                 let char_match2 = regex2
-                    .find(&matched[char_match.end() + gt_position + 3 ..])
+                    .find(&matched[char_match.end() + gt_position + 3..])
                     .unwrap();
                 let fn_name = &matched[char_match.end() + gt_position + 3
-                    .. char_match.end() + gt_position + 3 + char_match2.end()];
+                    ..char_match.end() + gt_position + 3 + char_match2.end()];
                 println!(
                     "TRAIT FOUND: {:?}, FUNCTION FOUND: {:?}",
                     second_trait_substr, fn_name
@@ -2097,6 +2143,7 @@ where
         &mut self,
         invoke: &'p terminator::Invoke,
     ) -> Result<Option<ReturnValue<B::BV>>> {
+        panic!("I thought we couldn't have invoke in no_std Rust");
         debug!("Symexing invoke {:?}", invoke);
         match self.resolve_function(&invoke.function)? {
             ResolvedFunction::HookActive { hook, hooked_thing } => {
@@ -2264,7 +2311,7 @@ where
                                 self.state.cur_loc.bb.name,
                             );
                             self.symex_from_cur_loc_through_end_of_function()
-                        }
+                        },
                         Some(callsite) => panic!("Received unexpected callsite {:?}", callsite),
                     }
                 } else {
@@ -2535,7 +2582,7 @@ where
                 let condvec = self.state.operand_to_bv(&select.condition)?;
                 let truevec = self.state.operand_to_bv(&select.true_value)?;
                 let falsevec = self.state.operand_to_bv(&select.false_value)?;
-                let final_bv = (0 .. *num_elements as u32)
+                let final_bv = (0..*num_elements as u32)
                     .map(|idx| {
                         let bit = condvec.slice(idx, idx);
                         bit.cond_bv(
@@ -2654,7 +2701,7 @@ pub(crate) fn unary_on_vector<F: FnMut(&V) -> Result<V>, V: BV>(
     assert_eq!(in_vector_size % num_elements, 0);
     let in_el_size = in_vector_size / num_elements;
     let in_scalars =
-        (0 .. num_elements).map(|i| in_vector.slice((i + 1) * in_el_size - 1, i * in_el_size));
+        (0..num_elements).map(|i| in_vector.slice((i + 1) * in_el_size - 1, i * in_el_size));
     let out_scalars = in_scalars.map(|s| op(&s)).collect::<Result<Vec<_>>>()?;
     out_scalars
         .into_iter()
@@ -2685,9 +2732,9 @@ where
     assert_eq!(in_vector_size % num_elements, 0);
     let in_el_size = in_vector_size / num_elements;
     let in_scalars_0 =
-        (0 .. num_elements).map(|i| in_vector_0.slice((i + 1) * in_el_size - 1, i * in_el_size));
+        (0..num_elements).map(|i| in_vector_0.slice((i + 1) * in_el_size - 1, i * in_el_size));
     let in_scalars_1 =
-        (0 .. num_elements).map(|i| in_vector_1.slice((i + 1) * in_el_size - 1, i * in_el_size));
+        (0..num_elements).map(|i| in_vector_1.slice((i + 1) * in_el_size - 1, i * in_el_size));
     let out_scalars = in_scalars_0
         .zip_eq(in_scalars_1)
         .map(|(s0, s1)| op(&s0, &s1));
