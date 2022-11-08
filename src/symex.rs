@@ -231,7 +231,7 @@ where
     /// `BBInstrIndex::Instr(0)` will still be considered valid, and be treated
     /// equivalently to `BBInstrIndex::Terminator`.
     fn symex_from_cur_loc_through_end_of_function(&mut self) -> Result<Option<ReturnValue<B::BV>>> {
-        debug!(
+        println!(
             "Symexing basic block {:?} in function {}",
             self.state.cur_loc.bb.name, self.state.cur_loc.func.name
         );
@@ -270,6 +270,7 @@ where
             for callback in &self.state.config.callbacks.instruction_callbacks {
                 callback(inst, &self.state)?;
             }
+            println!("Executing instruction: {:?}", inst);
             let result = if let Ok(binop) = inst.clone().try_into() {
                 self.symex_binop(&binop)
             } else {
@@ -318,6 +319,7 @@ where
                 Err(e) => return Err(e), // propagate any other errors
             };
         }
+        println!("past symex without error");
         let term = &self.state.cur_loc.bb.term;
         self.state.cur_loc.instr = BBInstrIndex::Terminator;
         self.state.cur_loc.source_loc = term.get_debug_loc().as_ref();
@@ -328,6 +330,7 @@ where
         for callback in &self.state.config.callbacks.terminator_callbacks {
             callback(term, &self.state)?;
         }
+        println!("about to handle terminator: {}", term);
         match term {
             Terminator::Ret(ret) => self.symex_return(ret).map(Some),
             Terminator::Br(br) => self.symex_br(br),
@@ -351,11 +354,11 @@ where
     /// `Ok(None)` if no possible paths were found.
     fn backtrack_and_continue(&mut self) -> Result<Option<ReturnValue<B::BV>>> {
         if self.state.revert_to_backtracking_point()? {
-            info!(
+            println!(
                 "Reverted to backtrack point; {} more backtrack points available",
                 self.state.count_backtracking_points()
             );
-            info!(
+            println!(
                 "Continuing in bb {} in function {:?}{}",
                 self.state.cur_loc.bb.name,
                 self.state.cur_loc.func.name,
@@ -597,8 +600,10 @@ where
 
     fn symex_icmp(&mut self, icmp: &'p instruction::ICmp) -> Result<()> {
         debug!("Symexing icmp {:?}", icmp);
+        println!("Gonna operand_to_bv");
         let bvfirstop = self.state.operand_to_bv(&icmp.operand0)?;
         let bvsecondop = self.state.operand_to_bv(&icmp.operand1)?;
+        println!("Past operand_to_bv");
         let bvpred = Self::intpred_to_bvpred(icmp.predicate);
         let op0_type = self.state.type_of(&icmp.operand0);
         let op1_type = self.state.type_of(&icmp.operand1);
@@ -608,6 +613,7 @@ where
                 op0_type, op1_type
             )));
         }
+        println!("A bit further");
         match self.state.type_of(icmp).as_ref() {
             Type::IntegerType { bits } if *bits == 1 => match op0_type.as_ref() {
                 Type::IntegerType { .. } | Type::VectorType { .. } | Type::PointerType { .. } => {
@@ -624,6 +630,7 @@ where
                     Type::IntegerType { .. } | Type::VectorType { .. } | Type::PointerType { .. } => {
                         let zero = self.state.zero(1);
                         let one = self.state.one(1);
+                        println!("Inside here");
                         let final_bv = binary_on_vector(&bvfirstop, &bvsecondop, *num_elements as u32, |a,b| bvpred(a,b).cond_bv(&one, &zero))?;
                         self.state.record_bv_result(icmp, final_bv)
                     },
@@ -1331,6 +1338,7 @@ where
             .as_ref()
             .map_or(false, |callsite| callsite.loc == self.state.cur_loc)
         {
+            println!("Clearing back to old state!");
             let new_state = self.state.fork_fresh();
             assert!(self.old_state.is_none()); // prevent retry-within-retry
             self.old_state = Some(self.state.clone());
@@ -1568,7 +1576,7 @@ where
         use glob::glob;
         use regex::Regex;
         let debug_loc = location.source_loc.unwrap();
-        println!("location: {:?}", location);
+        //println!("location: {:?}", location);
         // TODO: use chars().take() instead of byte indexing everywhere
         let mir_path_str_base: String = location
             .module
@@ -1615,7 +1623,7 @@ where
         // for now, assume that "dyn SomeTextA as SomeTextB" means SomeTextB is our trait
         // Usually, SomeTextA == SomeTextB, but for nested traits that can be false
         let regex = Regex::new(r"dyn [^\s]* as ").unwrap();
-        println!("line_str: {:?}", line_str);
+        //println!("line_str: {:?}", line_str);
         for mir_path in paths {
             //println!("scanning {:?}", mir_path);
             use std::io::Read;
@@ -1634,8 +1642,8 @@ where
                 let gt_position = &matched[char_match.end()..].find(">").unwrap();
                 let second_trait_substr =
                     &matched[char_match.end()..char_match.end() + gt_position];
-                println!("matched: {:?}", matched);
-                println!("1: {:?}, 2: {:?}", trait_substr, second_trait_substr);
+                //println!("matched: {:?}", matched);
+                //println!("1: {:?}, 2: {:?}", trait_substr, second_trait_substr);
                 assert!(
                     &matched[char_match.end() + gt_position..char_match.end() + gt_position + 3]
                         == ">::"
@@ -1685,7 +1693,7 @@ where
                         let (trait_name, func_name) = self.get_trait_method_from_debug_loc(&self.state.cur_loc);
                         // TODO: Verify that reusing project here is okay. I think it should be.
                         let concrete_func = crate::dyn_dispatch::longest_path_dyn_dispatch(self.project, self.state.config.clone(), &func_name, &trait_name);
-                        println!("Concrete function: {:?}", concrete_func);
+                        //println!("Concrete function: {:?}", concrete_func);
                         Either::Left(&concrete_func.unwrap())
                     }
                     Ok(soln) => {
@@ -2083,13 +2091,15 @@ where
         &mut self,
         switch: &'p terminator::Switch,
     ) -> Result<Option<ReturnValue<B::BV>>> {
-        debug!("Symexing switch {:?}", switch);
+        println!("Symexing switch {:?}", switch);
         let switchval = self.state.operand_to_bv(&switch.operand)?;
+        println!("got switchval");
         let dests = switch
             .dests
             .iter()
             .map(|(c, n)| self.state.const_to_bv(c).map(|c| (c, n)))
             .collect::<Result<Vec<(B::BV, &Name)>>>()?;
+        println!("got dests");
         let feasible_dests: Vec<_> = dests
             .iter()
             .map(|(c, n)| {
@@ -2102,13 +2112,16 @@ where
             .filter(|(_, _, b)| *b)
             .map(|(c, n, _)| (c, n))
             .collect::<Vec<(&B::BV, &Name)>>();
+        println!("found feasible dests");
         if feasible_dests.is_empty() {
             // none of the dests are feasible, we will always end up in the default dest
             self.state
                 .cur_loc
                 .move_to_start_of_bb_by_name(&switch.default_dest);
+            println!("default dest");
             self.symex_from_cur_loc_through_end_of_function()
         } else {
+            println!("in else");
             // make backtracking points for all but the first destination
             for (val, name) in feasible_dests.iter().skip(1) {
                 self.state

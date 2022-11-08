@@ -365,7 +365,7 @@ pub struct StackFrame<'p, V: BV> {
 #[derive(Clone)]
 pub struct BacktrackPoint<'p, B: Backend> {
     /// Where to resume execution
-    loc: Location<'p>,
+    pub loc: Location<'p>,
     /// Call stack at the `BacktrackPoint`.
     /// This is a vector of `StackFrame`s where the first entry is the top-level
     /// caller, and the last entry is the caller of the `BacktrackPoint`'s function.
@@ -610,7 +610,7 @@ where
         let new_solver = B::SolverRef::new();
         let clone1 = new_solver.clone();
         new_solver.set_opt(BtorOption::SolverTimeout(Some(std::time::Duration::new(
-            100, 0,
+            70, 0,
         )))); // longer timeout in here? configurable
         new_state.varmap = VarMap::new(new_solver, self.config.loop_bound);
         new_state.mem = RefCell::new(Memory::new_uninitialized(

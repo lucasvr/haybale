@@ -10,10 +10,15 @@ use std::hash::Hash;
 use std::iter::FromIterator;
 use std::ops::Deref;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+static SAT_COUNT: AtomicU64 = AtomicU64::new(0);
+
 /// Returns `true` if current constraints are satisfiable, `false` if not.
 ///
 /// Returns `Error::SolverError` if the query failed (e.g., was interrupted or timed out).
 pub fn sat(btor: &Btor) -> Result<bool> {
+    let count = SAT_COUNT.fetch_add(1, Ordering::Relaxed);
+    println!("sat count: {}", count);
     match btor.sat() {
         SolverResult::Sat => Ok(true),
         SolverResult::Unsat => Ok(false),
@@ -41,7 +46,11 @@ where
     for constraint in constraints {
         constraint.assert()?;
     }
+    println!("past assert");
     let retval = sat(btor);
+    if retval.is_err() {
+        println!("sat err");
+    }
     btor.pop(1);
     retval
 }
@@ -81,9 +90,12 @@ pub fn bvs_must_be_equal<V: BV>(btor: &Btor, a: &V, b: &V) -> Result<bool> {
 /// not require full model generation. You should prefer this function or
 /// `bvs_must_be_equal()` if they are sufficient for your needs.
 pub fn bvs_can_be_equal<V: BV>(btor: &Btor, a: &V, b: &V) -> Result<bool> {
+    println!("about to fail..?");
     if sat_with_extra_constraints(btor, &[a._eq(&b)])? {
+        println!("didnt fail");
         Ok(true)
     } else {
+        println!("didnt fail");
         Ok(false)
     }
 }

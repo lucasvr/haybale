@@ -33,7 +33,7 @@ fn find_longest_path<'p, B: Backend>(
         match em.next() {
             Some(res) => match res {
                 Ok(_) => {
-                    println!("dyn_dispatch: {:?}, next() worked", funcname);
+                    //println!("dyn_dispatch: {:?}, next() worked", funcname);
                 },
                 Err(Error::UnreachableInstruction) => {
                     // Rust inserts unreachable assertions along paths that it knows will not be
@@ -75,7 +75,7 @@ pub(crate) fn longest_path_dyn_dispatch<'p, B: Backend>(
     let lookup = map.get(&(method_name.to_string(), trait_name.to_string()));
     match lookup {
         Some(s) => {
-            println!("Longest lookup match!");
+            //println!("Longest lookup match!");
             return Ok(project.get_func_by_name(s).unwrap().0.name.as_str());
         },
         _ => {},
@@ -115,7 +115,7 @@ pub(crate) fn longest_path_dyn_dispatch<'p, B: Backend>(
         // if num matches == 1, just return the function name without tracing it (optimization)
         longest_func_name = Some(&matches2.next().unwrap().0.name);
     } else {
-        println!("num_matches: {:?}", num_matches);
+        //println!("num_matches: {:?}", num_matches);
         for (f, _m) in matches2 {
             let mut under_analysis_set = project.trait_under_analysis.try_lock().unwrap();
 
@@ -128,10 +128,10 @@ pub(crate) fn longest_path_dyn_dispatch<'p, B: Backend>(
                     .entry((trait_name.to_string(), method_name.to_string()))
                     .or_insert(HashSet::new());
                 val.insert(f.name.to_string().clone());
-                println!("STORING IN detected_recursion");
+                //println!("STORING IN detected_recursion");
                 continue;
             }
-            println!("tracing {:?}", f.name);
+            //println!("tracing {:?}", f.name);
             under_analysis_set.insert(f.name.to_string()); //store mangled name of the function we are tracing.
             drop(under_analysis_set); // unlock mutex
             if let Some((len, _state)) = find_longest_path(&f.name, &project, config.clone()) {
@@ -173,7 +173,7 @@ pub(crate) fn longest_path_dyn_dispatch<'p, B: Backend>(
             longest_func_name.unwrap().to_string(),
         );
     } else {
-        println!("Skipping save optimization, executing concrete function with recursion");
+        //println!("Skipping save optimization, executing concrete function with recursion");
     }
 
     Ok(longest_func_name.unwrap())
