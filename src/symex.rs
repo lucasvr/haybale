@@ -145,6 +145,7 @@ pub struct ExecutionManager<'p, B: Backend> {
     /// The `squash_unsats` setting from `Config`
     squash_unsats: bool,
     old_state: Option<State<'p, B>>,
+    pub(crate) retry_ongoing: bool,
 }
 
 impl<'p, B: Backend> ExecutionManager<'p, B> {
@@ -163,6 +164,7 @@ impl<'p, B: Backend> ExecutionManager<'p, B> {
             fresh: true,
             squash_unsats,
             old_state: None,
+            retry_ongoing: false,
         }
     }
 
@@ -1694,7 +1696,16 @@ where
                         // TODO: Verify that reusing project here is okay. I think it should be.
                         let concrete_func = crate::dyn_dispatch::longest_path_dyn_dispatch(self.project, self.state.config.clone(), &func_name, &trait_name);
                         //println!("Concrete function: {:?}", concrete_func);
-                        Either::Left(&concrete_func.unwrap())
+                        match concrete_func {
+                            Ok(concrete_name) => Either::Left(&concrete_name),
+                            // No match found! If the assumptions of this file were met for the binary under analysis,
+                            // this means that we attempted to call a trait method on a trait object despite no
+                            // implementations of that trait existing. Most likely, this means that we are executing an
+                            // impossible path (e.g. a path where a client option will in reality always be None, but
+                            // haybale does not know that because it does not have visibility into how capsules and
+                            // peripherals are setup at boot. Return an error indicating that no match was found
+                            Err(crate::dyn_dispatch::DynDispatchLookupError::NoImplementationsFound) => Either::Right(self.state.config.function_hooks.get_hook_for("exit").unwrap().clone()),
+                        }
                     }
                     Ok(soln) => {
                         match soln {

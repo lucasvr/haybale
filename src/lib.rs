@@ -36,7 +36,7 @@ pub mod callbacks;
 pub mod cell_memory;
 mod demangling;
 mod double_keyed_map;
-mod dyn_dispatch;
+pub mod dyn_dispatch;
 pub mod function_hooks;
 mod global_allocations;
 pub mod hook_utils;
