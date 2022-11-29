@@ -1641,14 +1641,20 @@ where
                 let matched = try_match.unwrap();
                 let char_match = regex.find(matched).unwrap();
                 let trait_substr = &matched[char_match.start() + 4..char_match.end() - 4];
-                let gt_position = &matched[char_match.end()..].find(">").unwrap();
+                let mut gt_position = matched[char_match.end()..].find(">").unwrap();
                 let second_trait_substr =
                     &matched[char_match.end()..char_match.end() + gt_position];
-                //println!("matched: {:?}", matched);
-                //println!("1: {:?}, 2: {:?}", trait_substr, second_trait_substr);
-                assert!(
-                    &matched[char_match.end() + gt_position..char_match.end() + gt_position + 3]
-                        == ">::"
+                let num_extra_gts = &matched[char_match.end() + gt_position..]
+                    .find(|c| c != '>')
+                    .unwrap()
+                    - 1; // last '>' might not be same as first one if trait itself
+                         // has generic parameters
+                gt_position += num_extra_gts;
+                println!("matched: {:?}", matched);
+                println!("1: {:?}, 2: {:?}", trait_substr, second_trait_substr);
+                assert_eq!(
+                    &matched[char_match.end() + gt_position..char_match.end() + gt_position + 3],
+                    ">::"
                 );
                 //assume will always have form "dyn SomeText as SomeTextB>::functext
                 let regex2 = Regex::new(r"[a-zA-Z0-9_]*").unwrap();
