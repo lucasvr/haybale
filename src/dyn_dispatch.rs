@@ -37,9 +37,21 @@ pub fn find_longest_path<'p, B: Backend>(
         match em.next() {
             Some(res) => match res {
                 Ok(_) => {
+                    if em.state().longest_path.is_some() {
+                        println!("Local DFS during retry");
+                        let mut state = em.mut_state();
+                        // We are in the middle of a retry, keep going until we restore to the old
+                        // state
+                        let path = state.get_path();
+                        let len = crate::get_path_length(path);
+                        if len > state.longest_path.as_ref().unwrap().len() {
+                            state.longest_path = Some(path.clone());
+                        }
+                        continue;
+                    }
                     if time_results {
                         print!(
-                            "Call to next() #{} completed in {} seconds ",
+                            "Top-level call to next() #{} completed in {} seconds ",
                             i,
                             start.elapsed().as_secs()
                         );
@@ -78,7 +90,11 @@ pub fn find_longest_path<'p, B: Backend>(
                         "Location of timeout: {}",
                         state.cur_loc.to_string_no_module()
                     );
-                    let callsite = &state.stack.last().unwrap().callsite;
+                    let callsite = &state
+                        .stack
+                        .last()
+                        .expect("Panicked somewhere in top level function")
+                        .callsite;
                     //
                     // 2. Instruct Haybale that the next time we call this function, we are going
                     //    to execute it without any constraints on its inputs -- e.g. we are going
@@ -90,8 +106,8 @@ pub fn find_longest_path<'p, B: Backend>(
                     //    complete. Configured to panic internally if this happens, lets see if it
                     //    is an issue in practice.
                     //
-                    state.fn_to_clear = Some(callsite.clone());
-                    println!("fn_to_clear: {:?}", state.fn_to_clear);
+                    let fn_to_clear = callsite.clone();
+                    println!("fn_to_clear: {:?}", fn_to_clear);
                     //
                     // 3. Find where in the failing path this function was last called, and then find
                     //    the backtracking point immediately preceding this call
@@ -100,10 +116,19 @@ pub fn find_longest_path<'p, B: Backend>(
                     // Verify that the restart point is not in the same call frame as the point of
                     // failure, if it is backtracking will not help us because the constraints will
                     // be unchanged. TODO improve this to not panic and instead print useful info.
-                    assert!(&(restart_point.stack.last().unwrap().callsite) != callsite);
-                    println!("restart point: {:?}", restart_point.loc);
-                    state.solver.push(1); // Solver level needs to be in sync with backtrack queue
-                    state.backtrack_points.borrow_mut().push(restart_point);
+                    // assert!(&(restart_point.stack.last().unwrap().callsite) != callsite); //
+                    // TODO correct the above line with an appropriate check
+                    //println!("restart point: {:?}", restart_point.loc);
+                    *state = *restart_point;
+                    state.fn_to_clear = Some(fn_to_clear);
+                    //let state = em.state();
+                    //let mut new_solver_params = Vec::new();
+                    //for param in em.bvparams.iter() {
+                    //    new_solver_params.push(Some(state.solver.match_bv(param).unwrap()));
+                    //}
+                    //for (i, param) in em.bvparams.iter_mut().enumerate() {
+                    //    *param = new_solver_params[i].take().unwrap();
+                    //}
                     em.retry_ongoing = true;
                     // now next call to next() should resume from restart_point!
                     continue;
@@ -115,7 +140,8 @@ pub fn find_longest_path<'p, B: Backend>(
                         start.elapsed().as_secs()
                     );
                     println!(
-                        "Failed while executing instruction in {}",
+                        "Failed with error: {} while executing instruction in {}",
+                        e,
                         em.state().cur_loc.func.name
                     );
                     println!("Pretty path source: {}", em.state().pretty_path_source());
@@ -125,7 +151,7 @@ pub fn find_longest_path<'p, B: Backend>(
             None => break,
         }
         if em.retry_ongoing {
-            println!("RETRY SUCCESSFUL!!!");
+            println!("Retry Successful!");
             em.retry_ongoing = false; // we completed a path
         }
         i += 1;
@@ -153,14 +179,11 @@ pub(crate) fn longest_path_dyn_dispatch<'p, B: Backend>(
     method_name: &str,
     trait_name: &str,
 ) -> Result<&'p str, DynDispatchLookupError> {
-    // First, check if we have already done a lookup for this trait method. For now use a global
-    // for ease, though a field on the project would work better (but would require adding lots
-    // of lifetime annotations).
     let map = project.trait_obj_map.try_lock().unwrap();
     let lookup = map.get(&(method_name.to_string(), trait_name.to_string()));
     match lookup {
         Some(s) => {
-            //println!("Longest lookup match!");
+            println!("Longest lookup match!");
             return Ok(project.get_func_by_name(s).unwrap().0.name.as_str());
         },
         _ => {},

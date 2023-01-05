@@ -69,7 +69,7 @@ pub struct State<'p, B: Backend> {
     /// (efficiently, thanks to the incremental solving capabilities of Boolector).
     pub backtrack_points: RefCell<Vec<BacktrackPoint<'p, B>>>,
     /// Log of the basic blocks which have been executed to get to this point
-    path: Vec<PathEntry<'p>>,
+    pub(crate) path: Vec<PathEntry<'p>>,
     /// Memory watchpoints (segments of memory to log reads/writes of).
     ///
     /// These will persist across backtracking - i.e., backtracking will not
@@ -97,13 +97,16 @@ pub struct State<'p, B: Backend> {
     /// In the case of a solver timeout, it can be useful to retrieve this if we
     /// want to try to make progress again with modified constraints, rather than
     /// giving up entirely.
-    pub last_backtrack_point: Option<BacktrackPoint<'p, B>>,
+    pub last_backtrack_point: Option<Box<Self>>,
     /// Function which should be executed without any constraints if/when it is
     /// encountered, denoted by the particular callsite pointing at this function
     /// which should be executed unconstrained.
     /// TODO: What to do about trait object dispatch affecting this approach? Realistically only
     /// want to clear state for the appropriate trait implementation which failed last time.
     pub fn_to_clear: Option<Callsite<'p>>,
+    /// When executing a function without any constraints after a failure, we fallback to a
+    /// bread-first search approach. This field stores the longest path found during that search
+    pub longest_path: Option<Vec<PathEntry<'p>>>,
 }
 
 /// Describes a location in LLVM IR in a format more suitable for printing - for
@@ -362,6 +365,12 @@ pub struct StackFrame<'p, V: BV> {
     restore_info: RestoreInfo<V>,
 }
 
+impl<'p, V: BV> StackFrame<'p, V> {
+    pub(crate) fn change_solver(&mut self, new_solver: V::SolverRef) {
+        self.restore_info.change_solver(new_solver);
+    }
+}
+
 #[derive(Clone)]
 pub struct BacktrackPoint<'p, B: Backend> {
     /// Where to resume execution
@@ -386,6 +395,17 @@ pub struct BacktrackPoint<'p, B: Backend> {
     /// If we ever revert to this `BacktrackPoint`, we will truncate the `path` to
     /// its first `path_len` entries.
     path_len: usize,
+}
+
+impl<'p, B: Backend> BacktrackPoint<'p, B> {
+    fn change_solver(&mut self, new_solver: B::SolverRef) {
+        self.varmap.change_solver(new_solver.clone());
+        self.mem.change_solver(new_solver.clone());
+        self.constraint = new_solver.match_bv(&self.constraint).unwrap();
+        for frame in self.stack.iter_mut() {
+            frame.change_solver(new_solver.clone());
+        }
+    }
 }
 
 impl<'p, B: Backend> fmt::Display for BacktrackPoint<'p, B> {
@@ -500,6 +520,7 @@ where
             mem_watchpoints: config.initial_mem_watchpoints.clone().into_iter().collect(),
             function_ptr_cache: HashMap::new(),
             last_backtrack_point: None,
+            longest_path: None,
 
             // listed last (out-of-order) so that they can be used above but moved in now
             solver,
@@ -596,6 +617,13 @@ where
         cloned.varmap.change_solver(new_solver.clone());
         cloned.mem.borrow_mut().change_solver(new_solver.clone());
         cloned.global_allocations.change_solver(new_solver.clone());
+        for b in cloned.backtrack_points.borrow_mut().iter_mut() {
+            let clone = new_solver.clone();
+            b.change_solver(clone);
+        }
+        for frame in cloned.stack.iter_mut() {
+            frame.change_solver(new_solver.clone());
+        }
         cloned.solver = new_solver;
         cloned
     }
@@ -603,18 +631,17 @@ where
     /// Duplicate the `State` but replace the solver and varmap / mem / allocations
     /// with fresh versions. This basically lets us keep the configuration / project
     /// / stack / backtrack points but still quickly explore a subfunction without
-    /// the solver being slowed down by all of the constraints on input variables and global
+    /// the solver being slowed down by all of the constraints on arguments and global
     /// memory.
     pub fn fork_fresh(&self) -> Self {
         let mut new_state = self.clone();
         let new_solver = B::SolverRef::new();
-        let clone1 = new_solver.clone();
         new_solver.set_opt(BtorOption::SolverTimeout(Some(std::time::Duration::new(
             70, 0,
         )))); // longer timeout in here? configurable
-        new_state.varmap = VarMap::new(new_solver, self.config.loop_bound);
+        new_state.varmap = VarMap::new(new_solver.clone(), self.config.loop_bound);
         new_state.mem = RefCell::new(Memory::new_uninitialized(
-            clone1,
+            new_solver.clone(),
             match self.config.null_pointer_checking {
                 NullPointerChecking::Simple => true,
                 NullPointerChecking::SplitPath => true,
@@ -623,8 +650,148 @@ where
             None,
             self.proj.pointer_size_bits(),
         ));
+        new_state.intrinsic_hooks = {
+            let mut intrinsic_hooks = FunctionHooks::new();
+            // we use "function names" that are clearly illegal, as an additional precaution to avoid collisions with actual function names
+            intrinsic_hooks.add("intrinsic: llvm.memset", &hooks::intrinsics::symex_memset);
+            intrinsic_hooks.add(
+                "intrinsic: llvm.memcpy/memmove",
+                &hooks::intrinsics::symex_memcpy,
+            );
+            intrinsic_hooks.add("intrinsic: llvm.bswap", &hooks::intrinsics::symex_bswap);
+            intrinsic_hooks.add("intrinsic: llvm.ctlz", &hooks::intrinsics::symex_ctlz);
+            intrinsic_hooks.add("intrinsic: llvm.cttz", &hooks::intrinsics::symex_cttz);
+            intrinsic_hooks.add(
+                "intrinsic: llvm.objectsize",
+                &hooks::intrinsics::symex_objectsize,
+            );
+            intrinsic_hooks.add("intrinsic: llvm.assume", &hooks::intrinsics::symex_assume);
+            intrinsic_hooks.add(
+                "intrinsic: llvm.uadd.with.overflow",
+                &hooks::intrinsics::symex_uadd_with_overflow,
+            );
+            intrinsic_hooks.add(
+                "intrinsic: llvm.sadd.with.overflow",
+                &hooks::intrinsics::symex_sadd_with_overflow,
+            );
+            intrinsic_hooks.add(
+                "intrinsic: llvm.usub.with.overflow",
+                &hooks::intrinsics::symex_usub_with_overflow,
+            );
+            intrinsic_hooks.add(
+                "intrinsic: llvm.ssub.with.overflow",
+                &hooks::intrinsics::symex_ssub_with_overflow,
+            );
+            intrinsic_hooks.add(
+                "intrinsic: llvm.umul.with.overflow",
+                &hooks::intrinsics::symex_umul_with_overflow,
+            );
+            intrinsic_hooks.add(
+                "intrinsic: llvm.smul.with.overflow",
+                &hooks::intrinsics::symex_smul_with_overflow,
+            );
+            intrinsic_hooks.add(
+                "intrinsic: llvm.uadd.sat",
+                &hooks::intrinsics::symex_uadd_sat,
+            );
+            intrinsic_hooks.add(
+                "intrinsic: llvm.sadd.sat",
+                &hooks::intrinsics::symex_sadd_sat,
+            );
+            intrinsic_hooks.add(
+                "intrinsic: llvm.usub.sat",
+                &hooks::intrinsics::symex_usub_sat,
+            );
+            intrinsic_hooks.add(
+                "intrinsic: llvm.ssub.sat",
+                &hooks::intrinsics::symex_ssub_sat,
+            );
+            intrinsic_hooks.add(
+                "intrinsic: generic_stub_hook",
+                &function_hooks::generic_stub_hook,
+            );
+            intrinsic_hooks.add("intrinsic: abort_hook", &function_hooks::abort_hook);
+            intrinsic_hooks
+        };
         new_state.global_allocations = GlobalAllocations::new();
-        // TODO: Should I be resetting backtrack points on the new state?
+        //global vars? Not clear to me if this is necessary, do we ever modify these?
+        //new_state
+        //    .global_allocations
+        //    .change_solver(new_solver.clone());
+        new_state.solver = new_solver;
+        for (var, module) in new_state
+            .proj
+            .all_global_vars()
+            .filter(|(var, _)| var.initializer.is_some())
+        {
+            // Allocate the global variable.
+            //
+            // In the allocation pass, we want to process each global variable
+            // exactly once, and the order doesn't matter, so we simply process
+            // definitions, since each global variable must have exactly one
+            // definition. Hence the `filter()` above.
+            if let Type::PointerType { pointee_type, .. } = var.ty.as_ref() {
+                let size_bits = new_state.size_in_bits(&pointee_type).expect(
+                    "Global variable has a struct type which is opaque in the entire Project",
+                );
+                let size_bits = if size_bits == 0 {
+                    debug!(
+                        "Global {:?} has size 0 bits; allocating 8 bits for it anyway",
+                        var.name
+                    );
+                    8
+                } else {
+                    size_bits
+                };
+                let addr = new_state.allocate(size_bits as u64);
+                debug!("Allocated {:?} at {:?}", var.name, addr);
+                new_state
+                    .global_allocations
+                    .allocate_global_var(var, module, addr);
+            } else {
+                panic!("Global variable has non-pointer type {:?}", &var.ty);
+            }
+        }
+        // We also have to allocate (at least a tiny bit of) memory for each
+        // `Function`, just so that we can have pointers to those `Function`s.
+        // We can use `global_allocations.get_func_for_address()` to interpret
+        // these function pointers.
+        // Similarly, we allocate tiny bits of memory for each function hook,
+        // so that we can have pointers to those hooks.
+        for (func, module) in new_state.proj.all_functions() {
+            let addr: u64 = new_state.alloc.alloc(64_u64); // we just allocate 64 bits for each function. No reason to allocate more.
+            let addr_bv = new_state.bv_from_u64(addr, new_state.proj.pointer_size_bits());
+            debug!("Allocated {:?} at {:?}", func.name, addr_bv);
+            new_state
+                .global_allocations
+                .allocate_function(func, module, addr, addr_bv);
+        }
+        for (funcname, hook) in new_state.config.function_hooks.get_all_hooks() {
+            let addr: u64 = new_state.alloc.alloc(64_u64); // we just allocate 64 bits for each function. No reason to allocate more.
+            let addr_bv = new_state.bv_from_u64(addr, new_state.proj.pointer_size_bits());
+            debug!("Allocated hook for {:?} at {:?}", funcname, addr_bv);
+            new_state
+                .global_allocations
+                .allocate_function_hook((*hook).clone(), addr, addr_bv);
+        }
+        // lets try clearing the stack and backtrack points
+        // TODO: Clearing the stack means that we are going to effectively begin a new DFS from
+        // this point, since the stack is what is used to continue all the way through to the end
+        // of the original entry point function. This is only valid if our goal is to find the
+        // longest path through this function and then save only that result. Otherwise I need to
+        // save the stack and do something to switch back and forth between solvers. Another
+        // alternative approach would be to just try clearing the constraints on the arguments to
+        // the function under test.
+        new_state.stack = Vec::new();
+        new_state.backtrack_points = RefCell::new(Vec::new());
+        //for b in new_state.backtrack_points.borrow_mut().iter_mut() {
+        //    let clone = new_solver.clone();
+        //    b.change_solver(clone);
+        //}
+        //for frame in new_state.stack.iter_mut() {
+        //    frame.change_solver(new_solver.clone());
+        //}
+
         new_state
     }
 
@@ -907,6 +1074,7 @@ where
     /// of the `BV` would exceed `max_versions_of_name` -- see
     /// [`Config`](struct.Config.html).)
     pub fn assign_bv_to_name(&mut self, name: Name, bv: B::BV) -> Result<()> {
+        println!("assigning bv to name");
         self.varmap
             .assign_bv_to_name(self.cur_loc.func.name.clone(), name, bv)
     }
@@ -961,6 +1129,7 @@ where
     /// Assumes the `Operand` is in the current function.
     /// (All `Operand`s should be either a constant or a variable we previously added to the state.)
     pub fn operand_to_bv(&self, op: &Operand) -> Result<B::BV> {
+        println!("op: {:?}", op);
         match op {
             Operand::ConstantOperand(c) => self.const_to_bv(c),
             Operand::LocalOperand { name, .. } => Ok(self
@@ -1979,10 +2148,23 @@ where
     /// returns `Ok(true)` if the operation was successful, `Ok(false)` if there are
     /// no saved backtracking points, or `Err` for other errors
     pub fn revert_to_backtracking_point(&mut self) -> Result<bool> {
+        if self.backtrack_points.borrow().len() > 0 {
+            // Store state from before we reverted to this backtrack point
+            self.last_backtrack_point = Some(Box::new(self.fork()));
+        }
         if let Some(bp) = self.backtrack_points.borrow_mut().pop() {
             debug!("Reverting to backtracking point {}", bp);
-            let cached = bp.clone();
-            self.solver.pop(1);
+            //let cached = bp.clone();
+            // This is the only place we pop off of the backtrack_points queue,
+            // so this ensures the last backtrack point is always stored.
+            self.solver.pop(1); // remove me if below is implemented and restored
+
+            /* TODO SHOULD I BE RESTORING OLD STATE HERE
+            if executed_cleanly_after_timeout() {
+                self.solver = self.old_state.solver;
+            } else {
+                self.solver.pop(1);
+            }*/
             self.varmap = bp.varmap;
             self.mem.replace(bp.mem);
             self.stack = bp.stack;
@@ -1991,7 +2173,7 @@ where
             bp.constraint.assert()?;
             // This is the only place we pop off of the backtrack_points queue,
             // so this ensures the last backtrack point is always stored.
-            self.last_backtrack_point = Some(cached);
+            //self.last_backtrack_point = Some(cached);
             Ok(true)
         } else {
             Ok(false)

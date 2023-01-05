@@ -88,17 +88,24 @@ impl<V: BV> VarMap<V> {
     /// of the `BV` would exceed `max_versions_of_name` -- see
     /// [`VarMap::new()`](struct.VarMap.html#method.new).)
     pub fn assign_bv_to_name(&mut self, funcname: String, name: Name, bv: V) -> Result<()> {
+        assert!(*(bv.get_solver()) == *(self.solver));
+        println!(
+            "bv::btor: {:?}, varmap::btor: {:?}",
+            *(bv.get_solver()),
+            *(self.solver)
+        );
         let new_version_num = self
             .version_num
             .entry(funcname.clone(), name.clone())
             .and_modify(|v| *v += 1) // increment if it already exists in map
             .or_insert(0); // insert a 0 if it didn't exist in map
+        println!("got new version num");
         if *new_version_num > self.max_version_num {
             Err(Error::LoopBoundExceeded(self.max_version_num))
         } else {
             // We don't actually use the new_version_num except for the above check,
             // since we aren't creating a new BV that needs a versioned name
-            debug!("Assigning var {:?} = {:?}", name, bv);
+            println!("Assigning var {:?} = {:?}", name, bv);
             self.active_version.insert(funcname, name, bv);
             Ok(())
         }
@@ -107,6 +114,7 @@ impl<V: BV> VarMap<V> {
     /// Look up the most recent `BV` created for the given `(String, Name)` pair.
     #[allow(clippy::ptr_arg)] // as of this writing, clippy warns that the &String argument should be &str; but it actually needs to be &String here
     pub fn lookup_var(&self, funcname: &String, name: &Name) -> &V {
+        println!("varmap::btor: {:?}", *(self.solver));
         self.active_version.get(funcname, name).unwrap_or_else(|| {
             let keys: Vec<(&String, &Name)> = self.active_version.keys().collect();
             panic!(
@@ -120,6 +128,7 @@ impl<V: BV> VarMap<V> {
     /// The `(String, Name)` pair must have already been previously assigned a value.
     #[allow(clippy::ptr_arg)] // as of this writing, clippy warns that the &String argument should be &str; but it actually needs to be &String here
     pub fn overwrite_latest_version_of_bv(&mut self, funcname: &String, name: &Name, bv: V) {
+        assert!(*(bv.get_solver()) == *(self.solver));
         let mapvalue: &mut V = self
             .active_version
             .get_mut(funcname, name)
@@ -200,6 +209,7 @@ impl<V: BV> VarMap<V> {
     pub fn restore_fn_vars(&mut self, rinfo: RestoreInfo<V>) {
         let funcname = rinfo.funcname.clone();
         for pair in rinfo.pairs_to_restore {
+            assert!(*(pair.1.get_solver()) == *(self.solver));
             let val = self
                 .active_version
                 .get_mut(&funcname, &pair.0)
@@ -227,6 +237,14 @@ impl<V: BV> VarMap<V> {
 pub struct RestoreInfo<V: BV> {
     funcname: String,
     pairs_to_restore: Vec<(Name, V)>,
+}
+
+impl<V: BV> RestoreInfo<V> {
+    pub(crate) fn change_solver(&mut self, new_solver: V::SolverRef) {
+        for (name, v) in self.pairs_to_restore.iter_mut() {
+            *v = new_solver.match_bv(v).unwrap();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -315,14 +333,14 @@ mod tests {
         // Check that we can create 10 versions of the same `Name`
         let funcname = "foo".to_owned();
         let name = Name::from(7);
-        for _ in 0 .. 10 {
+        for _ in 0..10 {
             let bv = varmap.new_bv_with_name(funcname.clone(), name.clone(), 64);
             assert!(bv.is_ok());
         }
 
         // Check that we can create another 10 versions of that `Name` in a different function
         let funcname2 = "bar".to_owned();
-        for _ in 0 .. 10 {
+        for _ in 0..10 {
             let bv = varmap.new_bv_with_name(funcname2.clone(), name.clone(), 64);
             assert!(bv.is_ok());
         }

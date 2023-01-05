@@ -2,6 +2,7 @@ use either::Either;
 use itertools::Itertools;
 use llvm_ir::instruction::{BinaryOp, InlineAssembly};
 use llvm_ir::types::NamedStructDef;
+use llvm_ir::types::Typed;
 use llvm_ir::*;
 use log::{debug, info};
 use std::collections::HashMap;
@@ -137,7 +138,7 @@ pub struct ExecutionManager<'p, B: Backend> {
     state: State<'p, B>,
     project: &'p Project,
     func: &'p Function,
-    bvparams: Vec<B::BV>,
+    pub(crate) bvparams: Vec<B::BV>,
     /// Whether the `ExecutionManager` is "fresh". A "fresh" `ExecutionManager`
     /// has not yet produced its first path, i.e., `next()` has not been called
     /// on it yet.
@@ -302,15 +303,26 @@ where
                     Instruction::AtomicRMW(_) => return Err(Error::UnsupportedInstruction("LLVM `AtomicRMW` instruction is not supported for the LLVM 9 version of Haybale; see Haybale issue #12".into())),
                     #[cfg(feature = "llvm-10-or-greater")]
                     Instruction::AtomicRMW(armw) => self.symex_atomicrmw(armw),
-                    Instruction::Call(call) => match self.symex_call(call) {
-                        Err(e) => Err(e),
-                        Ok(None) => Ok(()),
-                        Ok(Some(symexresult)) => return Ok(Some(symexresult)),
+                    Instruction::Call(call) => {
+                        let result = self.symex_call(call);
+                        //println!("Returned from symex call");
+                        match result {
+                            Err((Error::Unsat, executing_unconstrained)) if self.squash_unsats => {
+                                if executing_unconstrained {
+                                    panic!("Symex error durinh retry-after-timeout");
+                                }
+                                Err(Error::Unsat)
+                            },
+                            Err((e, _)) => Err(e), // propagate any other errors
+                            Ok(None) => Ok(()),
+                            Ok(Some(symexresult)) => return Ok(Some(symexresult)),
+                        }
                     },
                     Instruction::LandingPad(_) => return Err(Error::UnsupportedInstruction("Encountered an LLVM `LandingPad` instruction, but wasn't expecting it (there is no inflight exception)".to_owned())),
                     _ => return Err(Error::UnsupportedInstruction(format!("instruction {:?}", inst))),
                 }
             };
+            println!("returned from symexing");
             match result {
                 Ok(_) => {}, // no error, we can continue
                 Err(Error::Unsat) if self.squash_unsats => {
@@ -882,17 +894,29 @@ where
     }
 
     fn symex_gep(&mut self, gep: &'p instruction::GetElementPtr) -> Result<()> {
-        debug!("Symexing gep {:?}", gep);
+        println!("Symexing gep {:?}", gep);
         match self.state.type_of(gep).as_ref() {
             Type::PointerType { .. } => {
+                println!("pointer type");
                 let bvbase = self.state.operand_to_bv(&gep.address)?;
+                println!("got bvbase");
+                println!(
+                    "bvbase::btor: {:?}, state::btor: {:?}",
+                    *(bvbase.get_solver()),
+                    *(self.state.solver)
+                );
                 let offset = Self::get_offset_recursive(
                     &self.state,
                     gep.indices.iter(),
                     &self.state.type_of(&gep.address),
                     bvbase.get_width(),
                 )?;
-                self.state.record_bv_result(gep, bvbase.add(&offset))
+                println!("got offset");
+                let tmp = bvbase.add(&offset);
+                println!("got tmp");
+                let res = self.state.record_bv_result(gep, tmp);
+                println!("recorded result");
+                res
             },
             Type::VectorType { .. } => Err(Error::UnsupportedInstruction(
                 "GEP calculating a vector of pointers".to_owned(),
@@ -1325,29 +1349,121 @@ where
             .or(&mask_overwrite) // write the data into the appropriate position
     }
 
+    // The below function defines all cleanup that needs to happen after we execute a function
+    // unconstrained and then want to restore back to the original state after
+    // the exection completes. Currently this includes:
+    // - Switching back to the old state variable, which already references the original solver
+    // - Update the location to be the new location following the execution of the call
+    // - Unify any constraints on the mem object... (TODO)
+    // - Update variables based on the constraints of the returnvalue from the longest path (TODO
+    // -- save these)
+    // - ignore any changes to global allocations (..? is this ok?)
+    // - May need to pop a callsite? (TODO)
+    // - If any additional backtrack points were added on the new state, panic
+    // - Update the path by appending PathEntries onto the end of the current path (?)
+    // - Clear fn_to_clear since we have already executed that function unconstrained
+    fn restore_to_old_state(&mut self) {
+        println!("Restoring old state, continuing after function call!");
+        let new_state = self.state.clone();
+        self.state = self.old_state.take().unwrap();
+        /* TODO BRING THIS IN ONCE WE STORE THE RESULT OF THE LONGEST PATH
+        // Assign the returned value as the result of the caller's call instruction
+        match symexresult {
+            ReturnValue::Return(bv) => {
+                if self
+                    .state
+                    .assign_bv_to_name(call.dest.as_ref().unwrap().clone(), bv)
+                    .is_err()
+                {
+                    // This path is dead, try backtracking again
+                    return self.backtrack_and_continue();
+                };
+            },
+            ReturnValue::ReturnVoid => {},
+            ReturnValue::Throw(_) => {
+                panic!("This case should have been handled above")
+            },
+            ReturnValue::Abort => {
+                panic!("This case should have been handled above")
+            },
+        };
+        */
+        //self.state.cur_loc.inc(); // Advance to next instruction after the call
+        //self.state.record_path_entry(); // Not totally sure about this
+        assert_eq!(new_state.backtrack_points.borrow().len(), 0);
+        self.state.path.extend(new_state.path); // TODO: fact check
+                                                // for now trying to just push the callsite and hope that makes things work rather than
+                                                // call symex_from_cur_loc
+        self.state.push_callsite(
+            self.state
+                .fn_to_clear
+                .as_ref()
+                .unwrap()
+                .instr
+                .left()
+                .unwrap(),
+        );
+
+        self.state.fn_to_clear = None;
+        self.state.longest_path = None;
+    }
+
     /// If the returned value is `Ok(Some(_))`, then this is the final return value of the
     /// _current function_ (the function containing the call instruction), because either:
     ///     - we had backtracking and finished on a different path, and this is the final return value of the top-level function
     ///     - the called function threw an exception which the current function isn't set up to catch, so this is a `ReturnValue::Throw` which should be thrown from the current function
     ///
     /// If the returned value is `Ok(None)`, then we finished the call normally, and execution should continue from here.
-    fn symex_call(&mut self, call: &'p instruction::Call) -> Result<Option<ReturnValue<B::BV>>> {
+    fn symex_call(
+        &mut self,
+        call: &'p instruction::Call,
+    ) -> core::result::Result<Option<ReturnValue<B::BV>>, (Error, bool)> {
+        // TODO: remove use of closure.
+        let restore_state = |executing_unconstrained: bool, em: &mut Self| {
+            //em.restore_to_old_state(executing_unconstrained);
+        };
         // Before we symex this function, check if this is a function we want to clear state before
         // executing.
-        if self
+        let executing_unconstrained = self
             .state
             .fn_to_clear
             .as_ref()
-            .map_or(false, |callsite| callsite.loc == self.state.cur_loc)
-        {
+            .map_or(false, |callsite| callsite.loc == self.state.cur_loc);
+        if executing_unconstrained {
             println!("Clearing back to old state!");
             let new_state = self.state.fork_fresh();
+            println!("Forked fresh");
             assert!(self.old_state.is_none()); // prevent retry-within-retry
             self.old_state = Some(self.state.clone());
             self.state = new_state;
+            // set longest_path to be Some, indicating we are currently re-executing a
+            // function, and need to track the longest path.
+            self.state.longest_path = Some(Vec::new());
+
+            // Next, add arguments to the call to the state / solver, and
+            // set them as unconstrained. This logic is adapted from the logic for
+            // creating the initial bvparams values when symex_function() is called.
+            let params = std::iter::repeat(ParameterVal::Unconstrained).take(call.arguments.len());
+            for (arg, paramval) in call.arguments.iter().zip_eq(params) {
+                let _bvparam = match &arg.0 {
+                    Operand::LocalOperand {name, ty} => {
+                        let param_size = self.state
+                            .size_in_bits(&ty)
+                            .unwrap();
+                        assert_ne!(param_size, 0, "Parameter shouldn't have size 0 bits");
+                         self.state
+                            .new_bv_with_name(name.clone(), param_size)
+                            .unwrap()
+                        },
+                    _ => panic!("functions with constant operands or metadata operans not supported for unconstrained execution"),
+                };
+            }
         }
         debug!("Symexing call {:?}", call);
-        match self.resolve_function(&call.function)? {
+        match self
+            .resolve_function(&call.function)
+            .map_err(|e| (e, executing_unconstrained))?
+        {
             ResolvedFunction::HookActive { hook, hooked_thing } => {
                 let pretty_hookedthing = hooked_thing.to_string();
                 let quiet = if let HookedThing::Intrinsic(_) = hooked_thing {
@@ -1355,12 +1471,16 @@ where
                 } else {
                     false // executing a hook for an actual function call is relatively important from a logging standpoint
                 };
-                match self.symex_hook(call, &hook, &pretty_hookedthing, quiet)? {
+                match self
+                    .symex_hook(call, &hook, &pretty_hookedthing, quiet)
+                    .map_err(|e| (e, executing_unconstrained))?
+                {
                     // Assume that `symex_hook()` has taken care of validating the hook return value as necessary
                     ReturnValue::Return(retval) => {
                         // can't quite use `state.record_bv_result(call, retval)?` because Call is not HasResult
                         self.state
-                            .assign_bv_to_name(call.dest.as_ref().unwrap().clone(), retval)?;
+                            .assign_bv_to_name(call.dest.as_ref().unwrap().clone(), retval)
+                            .map_err(|e| (e, executing_unconstrained))?;
                     },
                     ReturnValue::ReturnVoid => {},
                     ReturnValue::Throw(bvptr) => {
@@ -1369,7 +1489,12 @@ where
                                                                // case
                                                                //return Ok(Some(ReturnValue::Throw(bvptr)));
                     },
-                    ReturnValue::Abort => return Ok(Some(ReturnValue::Abort)),
+                    ReturnValue::Abort => {
+                        if executing_unconstrained {
+                            panic!();
+                        }
+                        return Ok(Some(ReturnValue::Abort));
+                    },
                 }
                 let log_level = if quiet {
                     log::Level::Debug
@@ -1388,9 +1513,7 @@ where
                         String::new()
                     }
                 );
-                self.old_state.take().map(|old| {
-                    self.state = old;
-                });
+                restore_state(executing_unconstrained, self);
                 Ok(None)
             },
             ResolvedFunction::NoHookActive { called_funcname } => {
@@ -1403,47 +1526,63 @@ where
                     match self.state.type_of(call).as_ref() {
                         Type::VoidType => {},
                         ty => {
-                            let width = self.state.size_in_bits(&ty).ok_or_else(|| {
-                                Error::MalformedInstruction(
-                                    "Call return type is an opaque struct type".into(),
-                                )
-                            })?;
+                            let width = self
+                                .state
+                                .size_in_bits(&ty)
+                                .ok_or_else(|| {
+                                    Error::MalformedInstruction(
+                                        "Call return type is an opaque struct type".into(),
+                                    )
+                                })
+                                .map_err(|e| (e, executing_unconstrained))?;
                             assert_ne!(
                                 width, 0,
                                 "Function return type has size 0 bits but isn't void type"
                             ); // void type was handled above
-                            let bv = self.state.new_bv_with_name(
-                                Name::from(format!("{}_retval", called_funcname)),
-                                width,
-                            )?;
+                            let bv = self
+                                .state
+                                .new_bv_with_name(
+                                    Name::from(format!("{}_retval", called_funcname)),
+                                    width,
+                                )
+                                .map_err(|e| (e, executing_unconstrained))?;
                             self.state
-                                .assign_bv_to_name(call.dest.as_ref().unwrap().clone(), bv)?;
+                                .assign_bv_to_name(call.dest.as_ref().unwrap().clone(), bv)
+                                .map_err(|e| (e, executing_unconstrained))?;
                         },
                     }
-                    self.old_state.take().map(|old| {
-                        self.state = old;
-                    });
+                    restore_state(executing_unconstrained, self);
                     Ok(None)
                 } else if let Some((callee, callee_mod)) =
                     self.state.get_func_by_name(called_funcname)
                 {
                     if call.arguments.len() != callee.parameters.len() {
                         if callee.is_var_arg {
-                            return Err(Error::UnsupportedInstruction(format!(
-                                "Call of a function named {:?} which is variadic",
-                                callee.name
-                            )));
+                            return Err((
+                                Error::UnsupportedInstruction(format!(
+                                    "Call of a function named {:?} which is variadic",
+                                    callee.name
+                                )),
+                                executing_unconstrained,
+                            ));
                         } else {
-                            return Err(Error::MalformedInstruction(format!("Call of a function named {:?} which has {} parameters, but {} arguments were given", callee.name, callee.parameters.len(), call.arguments.len())));
+                            return Err((Error::MalformedInstruction(format!("Call of a function named {:?} which has {} parameters, but {} arguments were given", callee.name, callee.parameters.len(), call.arguments.len())), executing_unconstrained));
                         }
                     }
                     let bvargs: Vec<B::BV> = call
                         .arguments
                         .iter()
                         .map(|arg| self.state.operand_to_bv(&arg.0)) // have to do this before changing state.cur_loc, so that the lookups happen in the caller function
-                        .collect::<Result<Vec<B::BV>>>()?;
+                        .collect::<Result<Vec<B::BV>>>()
+                        .map_err(|e| (e, executing_unconstrained))?;
+
                     let saved_loc = self.state.cur_loc.clone();
-                    self.state.push_callsite(call);
+                    println!("Pushing callsite!");
+                    if !executing_unconstrained {
+                        // If we are executing unconstrained, we don't want to attempt to continue
+                        // execution past the callsite.
+                        self.state.push_callsite(call);
+                    }
                     self.state.cur_loc = Location {
                         module: callee_mod,
                         func: callee,
@@ -1455,7 +1594,9 @@ where
                         source_loc: None, // this will be updated once we get there and begin symex of the instruction
                     };
                     for (bvarg, param) in bvargs.into_iter().zip_eq(callee.parameters.iter()) {
-                        self.state.assign_bv_to_name(param.name.clone(), bvarg)?;
+                        self.state
+                            .assign_bv_to_name(param.name.clone(), bvarg)
+                            .map_err(|e| (e, executing_unconstrained))?;
                         // have to do the assign_bv_to_name calls after changing state.cur_loc, so that the variables are created in the callee function
                     }
                     info!(
@@ -1468,13 +1609,19 @@ where
                         },
                     );
                     let returned_bv = self
-                        .symex_from_cur_loc_through_end_of_function()?
-                        .ok_or(Error::Unsat)?; // if symex_from_cur_loc_through_end_of_function() returns `None`, this path is unsat
+                        .symex_from_cur_loc_through_end_of_function()
+                        .map_err(|e| (e, executing_unconstrained))?
+                        .ok_or(Error::Unsat)
+                        .map_err(|e| (e, executing_unconstrained))?; // if symex_from_cur_loc_through_end_of_function() returns `None`, this path is unsat
+                    println!("popping callsite!");
+                    if executing_unconstrained {
+                        // Rather than pop callsite, just give return indicating we finished
+                        // elsewhere.
+                        return Ok(Some(returned_bv));
+                    }
                     match self.state.pop_callsite() {
                         None => {
-                            self.old_state.take().map(|old| {
-                                self.state = old;
-                            });
+                            restore_state(executing_unconstrained, self);
                             Ok(Some(returned_bv))
                         }, // if there was no callsite to pop, then we finished elsewhere. See notes on `symex_call()`
                         Some(ref callsite)
@@ -1486,10 +1633,9 @@ where
                             match returned_bv {
                                 ReturnValue::Return(bv) => {
                                     // can't quite use `state.record_bv_result(call, bv)?` because Call is not HasResult
-                                    self.state.assign_bv_to_name(
-                                        call.dest.as_ref().unwrap().clone(),
-                                        bv,
-                                    )?;
+                                    self.state
+                                        .assign_bv_to_name(call.dest.as_ref().unwrap().clone(), bv)
+                                        .map_err(|e| (e, executing_unconstrained))?;
                                 },
                                 ReturnValue::ReturnVoid => assert_eq!(call.dest, None),
                                 ReturnValue::Throw(bvptr) => {
@@ -1498,9 +1644,7 @@ where
                                     //return Ok(Some(ReturnValue::Throw(bvptr)));
                                 },
                                 ReturnValue::Abort => {
-                                    self.old_state.take().map(|old| {
-                                        self.state = old;
-                                    });
+                                    restore_state(executing_unconstrained, self);
                                     return Ok(Some(ReturnValue::Abort));
                                 },
                             };
@@ -1516,17 +1660,16 @@ where
                                     String::new()
                                 },
                             );
-                            self.old_state.take().map(|old| {
-                                self.state = old;
-                            });
+                            restore_state(executing_unconstrained, self);
                             Ok(None)
                         },
                         Some(callsite) => panic!("Received unexpected callsite {:?}", callsite),
                     }
                 } else {
                     match self.state.config.function_hooks.get_default_hook() {
-                        None => Err(Error::FunctionNotFound(
-                            self.state.demangle(called_funcname),
+                        None => Err((
+                            Error::FunctionNotFound(self.state.demangle(called_funcname)),
+                            executing_unconstrained,
                         )),
                         Some(hook) => {
                             let hook = hook.clone(); // end the implicit borrow of `self` that arose from `get_default_hook()`. The `clone` is just an `Rc` and a `usize`, as of this writing
@@ -1535,14 +1678,19 @@ where
                                 "Using default hook for a function named {:?}",
                                 pretty_funcname
                             );
-                            match self.symex_hook(call, &hook.clone(), &pretty_funcname, true)? {
+                            match self
+                                .symex_hook(call, &hook.clone(), &pretty_funcname, true)
+                                .map_err(|e| (e, executing_unconstrained))?
+                            {
                                 // Assume that `symex_hook()` has taken care of validating the hook return value as necessary
                                 ReturnValue::Return(retval) => {
                                     // can't quite use `state.record_bv_result(call, retval)?` because Call is not HasResult
-                                    self.state.assign_bv_to_name(
-                                        call.dest.as_ref().unwrap().clone(),
-                                        retval,
-                                    )?;
+                                    self.state
+                                        .assign_bv_to_name(
+                                            call.dest.as_ref().unwrap().clone(),
+                                            retval,
+                                        )
+                                        .map_err(|e| (e, executing_unconstrained))?;
                                 },
                                 ReturnValue::ReturnVoid => {},
                                 ReturnValue::Throw(bvptr) => {
@@ -1551,15 +1699,11 @@ where
                                     //return Ok(Some(ReturnValue::Throw(bvptr)));
                                 },
                                 ReturnValue::Abort => {
-                                    self.old_state.take().map(|old| {
-                                        self.state = old;
-                                    });
+                                    restore_state(executing_unconstrained, self);
                                     return Ok(Some(ReturnValue::Abort));
                                 },
                             }
-                            self.old_state.take().map(|old| {
-                                self.state = old;
-                            });
+                            restore_state(executing_unconstrained, self);
                             Ok(None)
                         },
                     }
@@ -1579,7 +1723,6 @@ where
         use regex::Regex;
         let debug_loc = location.source_loc.unwrap();
         //println!("location: {:?}", location);
-        // TODO: use chars().take() instead of byte indexing everywhere
         let mir_path_str_base: String = location
             .module
             .name
@@ -1618,6 +1761,7 @@ where
         // and sometimes it is a relative path. It seems that when debug_loc.directory.is_some(),
         // it is a relative path. When it is an absolute path, I need to throw away the absolute
         // portion of it in order to correctly match the strings in the MIR.
+        // TODO: Make below not tock-specific
         if line_str.starts_with("/") && line_str.contains("tock/") {
             let idx = line_str.find("tock/").unwrap();
             line_str = line_str[idx + 5..].to_string();
@@ -2034,7 +2178,61 @@ where
     }
 
     /// Returns the `ReturnValue` representing the return value
-    fn symex_return(&self, ret: &'p terminator::Ret) -> Result<ReturnValue<B::BV>> {
+    fn symex_return(&mut self, ret: &'p terminator::Ret) -> Result<ReturnValue<B::BV>> {
+        println!("Symexing Return");
+        let fn_to_clear = self.state.fn_to_clear.as_ref().map_or("".into(), |f| {
+            println!("symexing return, during retry");
+            println!("callstack: {:?}", self.state.stack);
+            //println!(
+            //    "bt points: {:?}",
+            //    self.state.backtrack_points.as_ref().len()
+            //);
+            let fn_to_clear = if let constant::Constant::GlobalReference {
+                name: name::Name::Name(n),
+                ty,
+            } = f
+                .instr
+                .left()
+                .unwrap()
+                .function
+                .as_ref()
+                .right()
+                .unwrap()
+                .as_constant()
+                .unwrap()
+            {
+                n.to_string()
+            } else {
+                f.instr
+                    .left()
+                    .unwrap()
+                    .function
+                    .as_ref()
+                    .right()
+                    .unwrap()
+                    .to_string()
+            };
+            println!("fn_to_clear: {:?}", fn_to_clear);
+            println!("cur function: {:?}", self.state.cur_loc.func.name);
+            println!(
+                "longest path len: {:?}",
+                self.state.longest_path.as_ref().map_or(0, |p| p.len())
+            );
+            fn_to_clear
+        });
+        let executing_unconstrained = fn_to_clear == self.state.cur_loc.func.name
+            && self
+                .state
+                .longest_path
+                .as_ref()
+                .map_or(false, |path| path.len() > 0);
+        if executing_unconstrained
+            && self.state.current_callstack_depth() == 0
+            && self.state.backtrack_points.borrow().len() == 0
+        {
+            // Time to restore old state
+            self.restore_to_old_state();
+        }
         debug!("Symexing return {:?}", ret);
         Ok(ret
             .return_operand
