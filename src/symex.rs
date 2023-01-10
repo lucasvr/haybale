@@ -1392,8 +1392,9 @@ where
         //self.state.record_path_entry(); // Not totally sure about this
         assert_eq!(new_state.backtrack_points.borrow().len(), 0);
         self.state.path.extend(new_state.path); // TODO: fact check
-                                                // for now trying to just push the callsite and hope that makes things work rather than
-                                                // call symex_from_cur_loc
+
+        // for now trying to just push the callsite and hope that makes things work rather than
+        // call symex_from_cur_loc
         self.state.push_callsite(
             self.state
                 .fn_to_clear

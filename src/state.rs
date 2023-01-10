@@ -636,9 +636,7 @@ where
     pub fn fork_fresh(&self) -> Self {
         let mut new_state = self.clone();
         let new_solver = B::SolverRef::new();
-        new_solver.set_opt(BtorOption::SolverTimeout(Some(std::time::Duration::new(
-            70, 0,
-        )))); // longer timeout in here? configurable
+        new_solver.set_opt(BtorOption::SolverTimeout(self.config.solver_query_timeout));
         new_state.varmap = VarMap::new(new_solver.clone(), self.config.loop_bound);
         new_state.mem = RefCell::new(Memory::new_uninitialized(
             new_solver.clone(),
