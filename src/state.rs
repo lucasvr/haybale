@@ -420,6 +420,23 @@ impl<'p, B: Backend> fmt::Display for BacktrackPoint<'p, B> {
     }
 }
 
+fn pointertype_size_bits<'p, B: Backend>(
+    state: &State<'p, B>,
+    var: &llvm_ir::module::GlobalVariable
+) -> Option<u32> {
+    let error_msg = "Global variable has a struct type which is opaque in the entire Project";
+    #[cfg(feature = "llvm-16-or-greater")]
+    if let Type::PointerType { .. } = var.ty.as_ref() {
+        return Some(state.size_in_bits(var.ty.as_ref()).expect(error_msg));
+    }
+    #[cfg(feature = "llvm-15-or-lower")]
+    if let Type::PointerType { pointee_type, .. } = var.ty.as_ref() {
+        return Some(state.size_in_bits(&pointee_type).expect(error_msg));
+    }
+    None
+}
+
+
 impl<'p, B: Backend> State<'p, B>
 where
     B: 'p,
@@ -557,10 +574,7 @@ where
             // exactly once, and the order doesn't matter, so we simply process
             // definitions, since each global variable must have exactly one
             // definition. Hence the `filter()` above.
-            if let Type::PointerType { pointee_type, .. } = var.ty.as_ref() {
-                let size_bits = state.size_in_bits(&pointee_type).expect(
-                    "Global variable has a struct type which is opaque in the entire Project",
-                );
+            if let Some(size_bits) = pointertype_size_bits(&state, var) {
                 let size_bits = if size_bits == 0 {
                     debug!(
                         "Global {:?} has size 0 bits; allocating 8 bits for it anyway",
@@ -1243,15 +1257,19 @@ where
             Constant::Mul(m) => Ok(self
                 .const_to_bv(&m.operand0)?
                 .mul(&self.const_to_bv(&m.operand1)?)),
+            #[cfg(feature = "llvm-15-or-lower")]
             Constant::UDiv(u) => Ok(self
                 .const_to_bv(&u.operand0)?
                 .udiv(&self.const_to_bv(&u.operand1)?)),
+            #[cfg(feature = "llvm-15-or-lower")]
             Constant::SDiv(s) => Ok(self
                 .const_to_bv(&s.operand0)?
                 .sdiv(&self.const_to_bv(&s.operand1)?)),
+            #[cfg(feature = "llvm-15-or-lower")]
             Constant::URem(u) => Ok(self
                 .const_to_bv(&u.operand0)?
                 .urem(&self.const_to_bv(&u.operand1)?)),
+            #[cfg(feature = "llvm-15-or-lower")]
             Constant::SRem(s) => Ok(self
                 .const_to_bv(&s.operand0)?
                 .srem(&self.const_to_bv(&s.operand1)?)),
@@ -1316,10 +1334,12 @@ where
                     index
                 ))),
             },
+            #[cfg(feature = "llvm-15-or-lower")]
             Constant::ExtractValue(ev) => self.const_to_bv(Self::simplify_const_ev(
                 &ev.aggregate,
                 ev.indices.iter().copied(),
             )?),
+            #[cfg(feature = "llvm-15-or-lower")]
             Constant::InsertValue(iv) => {
                 let c = Self::simplify_const_iv(
                     &iv.aggregate,
@@ -1854,11 +1874,7 @@ where
         index: usize,
     ) -> Result<(u32, TypeRef)> {
         match base_type {
-            Type::PointerType {
-                pointee_type: element_type,
-                ..
-            }
-            | Type::ArrayType { element_type, .. }
+            Type::ArrayType { element_type, .. }
             | Type::VectorType { element_type, .. } => {
                 let el_size_bits = self.size_in_bits(element_type).ok_or_else(|| {
                     Error::MalformedInstruction(format!(
@@ -1929,8 +1945,7 @@ where
         solver: V::SolverRef,
     ) -> Result<(V, &'t Type)> {
         match base_type {
-            Type::PointerType { pointee_type: element_type, .. }
-            | Type::ArrayType { element_type, .. }
+            Type::ArrayType { element_type, .. }
             | Type::VectorType { element_type, .. }
             => {
                 let el_size_bits = self.size_in_bits(element_type)

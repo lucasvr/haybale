@@ -2901,7 +2901,7 @@ where
             RMWBinOp::Min => read_val.slt(&val).cond_bv(&read_val, &val),
             RMWBinOp::UMax => read_val.ugt(&val).cond_bv(&read_val, &val),
             RMWBinOp::UMin => read_val.ult(&val).cond_bv(&read_val, &val),
-            RMWBinOp::FAdd | RMWBinOp::FSub => {
+            RMWBinOp::FAdd | RMWBinOp::FSub | RMWBinOp::FMax | RMWBinOp::FMin => {
                 return Err(Error::UnsupportedInstruction(
                     "Floating-point operation in an AtomicRMW".into(),
                 ))

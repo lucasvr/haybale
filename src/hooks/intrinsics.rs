@@ -10,6 +10,42 @@ use crate::symex::unary_on_vector;
 use llvm_ir::Type;
 use std::convert::TryInto;
 
+fn symex_check_type_of<'p, B: Backend>(
+    intrinsic: &str,
+    state: &mut State<'p, B>,
+    op: &llvm_ir::Operand,
+    op_name: &str
+) -> Result<()> {
+    #[cfg(feature = "llvm-16-or-greater")]
+    match state.type_of(op).as_ref() {
+        Type::IntegerType { bits: 8 } => Ok(()),
+        pointee_type => {
+            return Err(Error::OtherError(format!(
+                "{}: Expected {} to be a pointer to i8, got pointer to {:?}",
+                intrinsic, op_name, pointee_type
+            )))
+        },
+    }
+    #[cfg(feature = "llvm-15-or-lower")]
+    match state.type_of(op).as_ref() {
+        Type::PointerType { pointee_type, .. } => match pointee_type.as_ref() {
+            Type::IntegerType { bits: 8 } => Ok(()),
+            _ => {
+                return Err(Error::OtherError(format!(
+                    "{}: Expected {} to be a pointer to i8, got pointer to {:?}",
+                    intrinsic, op_name, pointee_type
+                )))
+            },
+        },
+        ty => {
+            return Err(Error::OtherError(format!(
+                "{}: Expected {} to have pointer type, got {:?}",
+                intrinsic, op_name, ty
+            )))
+        },
+    }
+}
+
 pub fn symex_memset<'p, B: Backend>(
     state: &mut State<'p, B>,
     call: &'p dyn IsCall,
@@ -18,23 +54,7 @@ pub fn symex_memset<'p, B: Backend>(
     let addr = &call.get_arguments()[0].0;
     let val = &call.get_arguments()[1].0;
     let num_bytes = &call.get_arguments()[2].0;
-    match state.type_of(addr).as_ref() {
-        Type::PointerType { pointee_type, .. } => match pointee_type.as_ref() {
-            Type::IntegerType { bits: 8 } => (),
-            _ => {
-                return Err(Error::OtherError(format!(
-                    "memset: Expected address to be a pointer to i8, got pointer to {:?}",
-                    pointee_type
-                )))
-            },
-        },
-        ty => {
-            return Err(Error::OtherError(format!(
-                "memset: Expected address to have pointer type, got {:?}",
-                ty
-            )))
-        },
-    }
+    symex_check_type_of("memset", state, addr, "address")?;
 
     let addr = hook_utils::memset(state, addr, val, num_bytes)?;
 
@@ -56,40 +76,8 @@ pub fn symex_memcpy<'p, B: Backend>(
     let dest = &call.get_arguments()[0].0;
     let src = &call.get_arguments()[1].0;
     let num_bytes = &call.get_arguments()[2].0;
-    match state.type_of(dest).as_ref() {
-        Type::PointerType { pointee_type, .. } => match pointee_type.as_ref() {
-            Type::IntegerType { bits: 8 } => (),
-            _ => {
-                return Err(Error::OtherError(format!(
-                    "memcpy: Expected dest to be a pointer to i8, got pointer to {:?}",
-                    pointee_type
-                )))
-            },
-        },
-        ty => {
-            return Err(Error::OtherError(format!(
-                "memcpy: Expected dest to have pointer type, got {:?}",
-                ty
-            )))
-        },
-    }
-    match state.type_of(src).as_ref() {
-        Type::PointerType { pointee_type, .. } => match pointee_type.as_ref() {
-            Type::IntegerType { bits: 8 } => (),
-            _ => {
-                return Err(Error::OtherError(format!(
-                    "memcpy: Expected dest to be a pointer to i8, got pointer to {:?}",
-                    pointee_type
-                )))
-            },
-        },
-        ty => {
-            return Err(Error::OtherError(format!(
-                "memcpy: Expected dest to have pointer type, got {:?}",
-                ty
-            )))
-        },
-    }
+    symex_check_type_of("memcpy", state, dest, "dest")?;
+    symex_check_type_of("memcpy", state, src, "src")?;
 
     let dest = hook_utils::memcpy(state, dest, src, num_bytes)?;
 

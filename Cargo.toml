@@ -1,6 +1,6 @@
 [package]
 name = "haybale"
-version = "0.7.2"
+version = "0.7.2+llvm16"
 authors = ["Craig Disselkoen <craigdissel@gmail.com>"]
 edition = "2018"
 description = "Symbolic execution of LLVM IR, written in Rust"
@@ -11,7 +11,7 @@ keywords = ["symbolic", "llvm", "IR", "SMT"]
 license = "MIT"
 
 [dependencies]
-llvm-ir = "0.8.2"
+llvm-ir = { git = "https://github.com/cdisselkoen/llvm-ir.git", rev = "3800bcad" }
 boolector = "0.4.3"
 either = "1.9"
 itertools = "0.11"
@@ -22,6 +22,7 @@ log = "0.4.20"
 rustversion = "1.0"
 glob = "0.3.0"
 regex = "1.3.9"
+llvm-sys = "150.0.0"
 
 [dev-dependencies]
 env_logger = "0.10"
@@ -35,6 +36,8 @@ llvm-11 = ["llvm-ir/llvm-11", "llvm-11-or-lower", "llvm-11-or-greater"]
 llvm-12 = ["llvm-ir/llvm-12", "llvm-12-or-lower", "llvm-12-or-greater"]
 llvm-13 = ["llvm-ir/llvm-13", "llvm-13-or-lower", "llvm-13-or-greater"]
 llvm-14 = ["llvm-ir/llvm-14", "llvm-14-or-lower", "llvm-14-or-greater"]
+llvm-15 = ["llvm-ir/llvm-15", "llvm-15-or-lower", "llvm-15-or-greater"]
+llvm-16 = ["llvm-ir/llvm-16", "llvm-16-or-lower", "llvm-16-or-greater"]
 
 # If you enable this, Cargo will automatically download and build Boolector as
 # part of the build process.  If you don't enable this, Cargo will look for a
@@ -51,13 +54,17 @@ llvm-11-or-greater = ["llvm-10-or-greater"]
 llvm-12-or-greater = ["llvm-11-or-greater"]
 llvm-13-or-greater = ["llvm-12-or-greater"]
 llvm-14-or-greater = ["llvm-13-or-greater"]
+llvm-15-or-greater = ["llvm-14-or-greater"]
+llvm-16-or-greater = ["llvm-15-or-greater"]
 
 llvm-9-or-lower = ["llvm-10-or-lower"]
 llvm-10-or-lower = ["llvm-11-or-lower"]
 llvm-11-or-lower = ["llvm-12-or-lower"]
 llvm-12-or-lower = ["llvm-13-or-lower"]
 llvm-13-or-lower = ["llvm-14-or-lower"]
-llvm-14-or-lower = []
+llvm-14-or-lower = ["llvm-15-or-lower"]
+llvm-15-or-lower = ["llvm-16-or-lower"]
+llvm-16-or-lower = []
 ###
 
 # These features select the corresponding LLVM version, and require an exact
@@ -69,6 +76,8 @@ llvm-11-strict = ["llvm-11", "llvm-ir/llvm-11-strict"]
 llvm-12-strict = ["llvm-12", "llvm-ir/llvm-12-strict"]
 llvm-13-strict = ["llvm-13", "llvm-ir/llvm-13-strict"]
 llvm-14-strict = ["llvm-14", "llvm-ir/llvm-14-strict"]
+llvm-15-strict = ["llvm-15", "llvm-ir/llvm-15-strict"]
+llvm-16-strict = ["llvm-16", "llvm-ir/llvm-16-strict"]
 
 [package.metadata.docs.rs]
 # Generate docs.rs documentation with the llvm-10 feature
