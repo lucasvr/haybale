@@ -742,10 +742,7 @@ where
             // exactly once, and the order doesn't matter, so we simply process
             // definitions, since each global variable must have exactly one
             // definition. Hence the `filter()` above.
-            if let Type::PointerType { pointee_type, .. } = var.ty.as_ref() {
-                let size_bits = new_state.size_in_bits(&pointee_type).expect(
-                    "Global variable has a struct type which is opaque in the entire Project",
-                );
+            if let Some(size_bits) = pointertype_size_bits(&new_state, var) {
                 let size_bits = if size_bits == 0 {
                     debug!(
                         "Global {:?} has size 0 bits; allocating 8 bits for it anyway",
@@ -1944,18 +1941,29 @@ where
         index: &V,
         solver: V::SolverRef,
     ) -> Result<(V, &'t Type)> {
+        let get_offset = |element_type, return_type| {
+            let el_size_bits = self.size_in_bits(element_type)
+                .ok_or_else(|| Error::OtherError(format!("get_offset encountered an opaque struct type: {:?}", element_type)))?;
+            if el_size_bits % 8 != 0 {
+                Err(Error::UnsupportedInstruction(format!("get_offset encountered a type with size {} bits", el_size_bits)))
+            } else {
+                let el_size_bytes = el_size_bits / 8;
+                Ok((index.mul(&V::from_u64(solver, el_size_bytes as u64, index.get_width())), return_type))
+            }
+        };
+
         match base_type {
-            Type::ArrayType { element_type, .. }
-            | Type::VectorType { element_type, .. }
-            => {
-                let el_size_bits = self.size_in_bits(element_type)
-                    .ok_or_else(|| Error::OtherError(format!("get_offset encountered an opaque struct type: {:?}", element_type)))?;
-                if el_size_bits % 8 != 0 {
-                    Err(Error::UnsupportedInstruction(format!("Encountered a type with size {} bits", el_size_bits)))
-                } else {
-                    let el_size_bytes = el_size_bits / 8;
-                    Ok((index.mul(&V::from_u64(solver, el_size_bytes as u64, index.get_width())), &element_type))
-                }
+            #[cfg(feature = "llvm-16-or-greater")]
+            Type::PointerType { .. } => {
+                let element_type = self.cur_loc.module.types.pointer();
+                get_offset(&element_type, base_type)
+            },
+            #[cfg(feature = "llvm-15-or-lower")]
+            Type::PointerType { pointee_type, .. } => {
+                get_offset(pointee_type, pointee_type)
+            },
+            Type::ArrayType { element_type, .. } | Type::VectorType { element_type, .. } => {
+                get_offset(element_type, element_type)
             },
             Type::StructType { .. } | Type::NamedStructType { .. } => {
                 Err(Error::MalformedInstruction("Index into struct type must be constant; consider using `get_offset_constant_index` instead of `get_offset_bv_index`".to_owned()))
