@@ -6,7 +6,7 @@ use crate::backend::{SolverRef, BV};
 use crate::double_keyed_map::DoubleKeyedMap;
 use crate::error::*;
 use itertools::Itertools;
-use log::debug;
+use log::{debug, trace};
 
 use llvm_ir::Name;
 
@@ -89,7 +89,7 @@ impl<V: BV> VarMap<V> {
     /// [`VarMap::new()`](struct.VarMap.html#method.new).)
     pub fn assign_bv_to_name(&mut self, funcname: String, name: Name, bv: V) -> Result<()> {
         assert!(*(bv.get_solver()) == *(self.solver));
-        println!(
+        trace!(
             "bv::btor: {:?}, varmap::btor: {:?}",
             *(bv.get_solver()),
             *(self.solver)
@@ -99,13 +99,13 @@ impl<V: BV> VarMap<V> {
             .entry(funcname.clone(), name.clone())
             .and_modify(|v| *v += 1) // increment if it already exists in map
             .or_insert(0); // insert a 0 if it didn't exist in map
-        println!("got new version num");
+        trace!("got new version num");
         if *new_version_num > self.max_version_num {
             Err(Error::LoopBoundExceeded(self.max_version_num))
         } else {
             // We don't actually use the new_version_num except for the above check,
             // since we aren't creating a new BV that needs a versioned name
-            println!("Assigning var {:?} = {:?}", name, bv);
+            trace!("Assigning var {:?} = {:?}", name, bv);
             self.active_version.insert(funcname, name, bv);
             Ok(())
         }
@@ -114,7 +114,7 @@ impl<V: BV> VarMap<V> {
     /// Look up the most recent `BV` created for the given `(String, Name)` pair.
     #[allow(clippy::ptr_arg)] // as of this writing, clippy warns that the &String argument should be &str; but it actually needs to be &String here
     pub fn lookup_var(&self, funcname: &String, name: &Name) -> &V {
-        println!("varmap::btor: {:?}", *(self.solver));
+        trace!("varmap::btor: {:?}", *(self.solver));
         self.active_version.get(funcname, name).unwrap_or_else(|| {
             let keys: Vec<(&String, &Name)> = self.active_version.keys().collect();
             panic!(

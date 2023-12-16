@@ -4,7 +4,7 @@ use either::Either;
 use itertools::Itertools;
 use llvm_ir::types::{FPType, NamedStructDef, Typed};
 use llvm_ir::*;
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -1083,7 +1083,7 @@ where
     /// of the `BV` would exceed `max_versions_of_name` -- see
     /// [`Config`](struct.Config.html).)
     pub fn assign_bv_to_name(&mut self, name: Name, bv: B::BV) -> Result<()> {
-        println!("assigning bv to name");
+        trace!("assigning bv to name");
         self.varmap
             .assign_bv_to_name(self.cur_loc.func.name.clone(), name, bv)
     }
@@ -1138,7 +1138,7 @@ where
     /// Assumes the `Operand` is in the current function.
     /// (All `Operand`s should be either a constant or a variable we previously added to the state.)
     pub fn operand_to_bv(&self, op: &Operand) -> Result<B::BV> {
-        println!("op: {:?}", op);
+        trace!("op: {:?}", op);
         match op {
             Operand::ConstantOperand(c) => self.const_to_bv(c),
             Operand::LocalOperand { name, .. } => Ok(self

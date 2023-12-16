@@ -456,7 +456,6 @@ impl BV for boolector::BV<Rc<Btor>> {
         self._ne(other)
     }
     fn add(&self, other: &Self) -> Self {
-        println!("adding");
         self.add(other)
     }
     fn sub(&self, other: &Self) -> Self {

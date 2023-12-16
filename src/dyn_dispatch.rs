@@ -50,7 +50,7 @@ pub fn find_longest_path<'p, B: Backend>(
                         continue;
                     }
                     if time_results {
-                        print!(
+                        println!(
                             "Top-level call to next() #{} completed in {} seconds ",
                             i,
                             start.elapsed().as_secs()

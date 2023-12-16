@@ -4,7 +4,7 @@ use llvm_ir::instruction::{BinaryOp, InlineAssembly};
 use llvm_ir::types::NamedStructDef;
 use llvm_ir::types::Typed;
 use llvm_ir::*;
-use log::{debug, info};
+use log::{debug, info, trace};
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt;
@@ -234,7 +234,7 @@ where
     /// `BBInstrIndex::Instr(0)` will still be considered valid, and be treated
     /// equivalently to `BBInstrIndex::Terminator`.
     fn symex_from_cur_loc_through_end_of_function(&mut self) -> Result<Option<ReturnValue<B::BV>>> {
-        println!(
+        trace!(
             "Symexing basic block {:?} in function {}",
             self.state.cur_loc.bb.name, self.state.cur_loc.func.name
         );
@@ -273,7 +273,7 @@ where
             for callback in &self.state.config.callbacks.instruction_callbacks {
                 callback(inst, &self.state)?;
             }
-            println!("Executing instruction: {:?}", inst);
+            trace!("Executing instruction: {:?}", inst);
             let result = if let Ok(binop) = inst.clone().try_into() {
                 self.symex_binop(&binop)
             } else {
@@ -305,7 +305,7 @@ where
                     Instruction::AtomicRMW(armw) => self.symex_atomicrmw(armw),
                     Instruction::Call(call) => {
                         let result = self.symex_call(call);
-                        //println!("Returned from symex call");
+                        //trace!("Returned from symex call");
                         match result {
                             Err((Error::Unsat, executing_unconstrained)) if self.squash_unsats => {
                                 if executing_unconstrained {
@@ -322,7 +322,7 @@ where
                     _ => return Err(Error::UnsupportedInstruction(format!("instruction {:?}", inst))),
                 }
             };
-            println!("returned from symexing");
+            trace!("returned from symexing");
             match result {
                 Ok(_) => {}, // no error, we can continue
                 Err(Error::Unsat) if self.squash_unsats => {
@@ -333,7 +333,7 @@ where
                 Err(e) => return Err(e), // propagate any other errors
             };
         }
-        println!("past symex without error");
+        trace!("past symex without error");
         let term = &self.state.cur_loc.bb.term;
         self.state.cur_loc.instr = BBInstrIndex::Terminator;
         self.state.cur_loc.source_loc = term.get_debug_loc().as_ref();
@@ -344,7 +344,7 @@ where
         for callback in &self.state.config.callbacks.terminator_callbacks {
             callback(term, &self.state)?;
         }
-        println!("about to handle terminator: {}", term);
+        trace!("about to handle terminator: {}", term);
         match term {
             Terminator::Ret(ret) => self.symex_return(ret).map(Some),
             Terminator::Br(br) => self.symex_br(br),
@@ -368,11 +368,11 @@ where
     /// `Ok(None)` if no possible paths were found.
     fn backtrack_and_continue(&mut self) -> Result<Option<ReturnValue<B::BV>>> {
         if self.state.revert_to_backtracking_point()? {
-            println!(
+            trace!(
                 "Reverted to backtrack point; {} more backtrack points available",
                 self.state.count_backtracking_points()
             );
-            println!(
+            trace!(
                 "Continuing in bb {} in function {:?}{}",
                 self.state.cur_loc.bb.name,
                 self.state.cur_loc.func.name,
@@ -614,10 +614,10 @@ where
 
     fn symex_icmp(&mut self, icmp: &'p instruction::ICmp) -> Result<()> {
         debug!("Symexing icmp {:?}", icmp);
-        println!("Gonna operand_to_bv");
+        trace!("Gonna operand_to_bv");
         let bvfirstop = self.state.operand_to_bv(&icmp.operand0)?;
         let bvsecondop = self.state.operand_to_bv(&icmp.operand1)?;
-        println!("Past operand_to_bv");
+        trace!("Past operand_to_bv");
         let bvpred = Self::intpred_to_bvpred(icmp.predicate);
         let op0_type = self.state.type_of(&icmp.operand0);
         let op1_type = self.state.type_of(&icmp.operand1);
@@ -627,7 +627,7 @@ where
                 op0_type, op1_type
             )));
         }
-        println!("A bit further");
+        trace!("A bit further");
         match self.state.type_of(icmp).as_ref() {
             Type::IntegerType { bits } if *bits == 1 => match op0_type.as_ref() {
                 Type::IntegerType { .. } | Type::VectorType { .. } | Type::PointerType { .. } => {
@@ -644,7 +644,7 @@ where
                     Type::IntegerType { .. } | Type::VectorType { .. } | Type::PointerType { .. } => {
                         let zero = self.state.zero(1);
                         let one = self.state.one(1);
-                        println!("Inside here");
+                        trace!("Inside here");
                         let final_bv = binary_on_vector(&bvfirstop, &bvsecondop, *num_elements as u32, |a,b| bvpred(a,b).cond_bv(&one, &zero))?;
                         self.state.record_bv_result(icmp, final_bv)
                     },
@@ -894,13 +894,13 @@ where
     }
 
     fn symex_gep(&mut self, gep: &'p instruction::GetElementPtr) -> Result<()> {
-        println!("Symexing gep {:?}", gep);
+        trace!("Symexing gep {:?}", gep);
         match self.state.type_of(gep).as_ref() {
             Type::PointerType { .. } => {
-                println!("pointer type");
+                trace!("pointer type");
                 let bvbase = self.state.operand_to_bv(&gep.address)?;
-                println!("got bvbase");
-                println!(
+                trace!("got bvbase");
+                trace!(
                     "bvbase::btor: {:?}, state::btor: {:?}",
                     *(bvbase.get_solver()),
                     *(self.state.solver)
@@ -911,11 +911,11 @@ where
                     &self.state.type_of(&gep.address),
                     bvbase.get_width(),
                 )?;
-                println!("got offset");
+                trace!("got offset");
                 let tmp = bvbase.add(&offset);
-                println!("got tmp");
+                trace!("got tmp");
                 let res = self.state.record_bv_result(gep, tmp);
-                println!("recorded result");
+                trace!("recorded result");
                 res
             },
             Type::VectorType { .. } => Err(Error::UnsupportedInstruction(
@@ -1363,7 +1363,7 @@ where
     // - Update the path by appending PathEntries onto the end of the current path (?)
     // - Clear fn_to_clear since we have already executed that function unconstrained
     fn restore_to_old_state(&mut self) {
-        println!("Restoring old state, continuing after function call!");
+        trace!("Restoring old state, continuing after function call!");
         let new_state = self.state.clone();
         self.state = self.old_state.take().unwrap();
         /* TODO BRING THIS IN ONCE WE STORE THE RESULT OF THE LONGEST PATH
@@ -1431,9 +1431,9 @@ where
             .as_ref()
             .map_or(false, |callsite| callsite.loc == self.state.cur_loc);
         if executing_unconstrained {
-            println!("Clearing back to old state!");
+            trace!("Clearing back to old state!");
             let new_state = self.state.fork_fresh();
-            println!("Forked fresh");
+            trace!("Forked fresh");
             assert!(self.old_state.is_none()); // prevent retry-within-retry
             self.old_state = Some(self.state.clone());
             self.state = new_state;
@@ -1578,7 +1578,7 @@ where
                         .map_err(|e| (e, executing_unconstrained))?;
 
                     let saved_loc = self.state.cur_loc.clone();
-                    println!("Pushing callsite!");
+                    trace!("Pushing callsite!");
                     if !executing_unconstrained {
                         // If we are executing unconstrained, we don't want to attempt to continue
                         // execution past the callsite.
@@ -1614,7 +1614,7 @@ where
                         .map_err(|e| (e, executing_unconstrained))?
                         .ok_or(Error::Unsat)
                         .map_err(|e| (e, executing_unconstrained))?; // if symex_from_cur_loc_through_end_of_function() returns `None`, this path is unsat
-                    println!("popping callsite!");
+                    trace!("popping callsite!");
                     if executing_unconstrained {
                         // Rather than pop callsite, just give return indicating we finished
                         // elsewhere.
@@ -1723,7 +1723,7 @@ where
         use glob::glob;
         use regex::Regex;
         let debug_loc = location.source_loc.unwrap();
-        //println!("location: {:?}", location);
+        //trace!("location: {:?}", location);
         let mir_path_str_base: String = location
             .module
             .name
@@ -1750,7 +1750,7 @@ where
                 .contains(&crate_name)
         });
         let mir_path = filtered_paths.next().unwrap();
-        println!("mir_path: {:?}", mir_path);
+        trace!("mir_path: {:?}", mir_path);
         assert!(filtered_paths.next().is_none()); // dont want multiple matches now, if so could be ambiguity
         */
         let mut line_str = debug_loc.filename.clone()
@@ -1770,9 +1770,9 @@ where
         // for now, assume that "dyn SomeTextA as SomeTextB" means SomeTextB is our trait
         // Usually, SomeTextA == SomeTextB, but for nested traits that can be false
         let regex = Regex::new(r"dyn [^\s]* as ").unwrap();
-        //println!("line_str: {:?}", line_str);
+        //trace!("line_str: {:?}", line_str);
         for mir_path in paths {
-            //println!("scanning {:?}", mir_path);
+            //trace!("scanning {:?}", mir_path);
             use std::io::Read;
             let mut mir_file = std::fs::File::open(&mir_path).unwrap();
             let mut mir_string = String::new();
@@ -1795,8 +1795,8 @@ where
                     - 1; // last '>' might not be same as first one if trait itself
                          // has generic parameters
                 gt_position += num_extra_gts;
-                println!("matched: {:?}", matched);
-                println!("1: {:?}, 2: {:?}", trait_substr, second_trait_substr);
+                trace!("matched: {:?}", matched);
+                trace!("1: {:?}, 2: {:?}", trait_substr, second_trait_substr);
                 assert_eq!(
                     &matched[char_match.end() + gt_position..char_match.end() + gt_position + 3],
                     ">::"
@@ -1808,7 +1808,7 @@ where
                     .unwrap();
                 let fn_name = &matched[char_match.end() + gt_position + 3
                     ..char_match.end() + gt_position + 3 + char_match2.end()];
-                println!(
+                trace!(
                     "TRAIT FOUND: {:?}, FUNCTION FOUND: {:?}",
                     second_trait_substr, fn_name
                 );
@@ -1846,7 +1846,7 @@ where
                         let (trait_name, func_name) = self.get_trait_method_from_debug_loc(&self.state.cur_loc);
                         // TODO: Verify that reusing project here is okay. I think it should be.
                         let concrete_func = crate::dyn_dispatch::longest_path_dyn_dispatch(self.project, self.state.config.clone(), &func_name, &trait_name);
-                        //println!("Concrete function: {:?}", concrete_func);
+                        //trace!("Concrete function: {:?}", concrete_func);
                         match concrete_func {
                             Ok(concrete_name) => Either::Left(&concrete_name),
                             // No match found! If the assumptions of this file were met for the binary under analysis,
@@ -2172,7 +2172,7 @@ where
         let mut fake_recursion_store = self.project.fake_recursion_store.try_lock().unwrap();
         let removed = fake_recursion_store.remove(&hooked_funcname.to_string());
         if removed {
-            println!("Removed {:?} from fake recursion store.", hooked_funcname);
+            trace!("Removed {:?} from fake recursion store.", hooked_funcname);
         }
 
         ret
@@ -2180,11 +2180,11 @@ where
 
     /// Returns the `ReturnValue` representing the return value
     fn symex_return(&mut self, ret: &'p terminator::Ret) -> Result<ReturnValue<B::BV>> {
-        println!("Symexing Return");
+        trace!("Symexing Return");
         let fn_to_clear = self.state.fn_to_clear.as_ref().map_or("".into(), |f| {
-            println!("symexing return, during retry");
-            println!("callstack: {:?}", self.state.stack);
-            //println!(
+            trace!("symexing return, during retry");
+            trace!("callstack: {:?}", self.state.stack);
+            //trace!(
             //    "bt points: {:?}",
             //    self.state.backtrack_points.as_ref().len()
             //);
@@ -2213,9 +2213,9 @@ where
                     .unwrap()
                     .to_string()
             };
-            println!("fn_to_clear: {:?}", fn_to_clear);
-            println!("cur function: {:?}", self.state.cur_loc.func.name);
-            println!(
+            trace!("fn_to_clear: {:?}", fn_to_clear);
+            trace!("cur function: {:?}", self.state.cur_loc.func.name);
+            trace!(
                 "longest path len: {:?}",
                 self.state.longest_path.as_ref().map_or(0, |p| p.len())
             );
@@ -2307,15 +2307,15 @@ where
         &mut self,
         switch: &'p terminator::Switch,
     ) -> Result<Option<ReturnValue<B::BV>>> {
-        println!("Symexing switch {:?}", switch);
+        trace!("Symexing switch {:?}", switch);
         let switchval = self.state.operand_to_bv(&switch.operand)?;
-        println!("got switchval");
+        trace!("got switchval");
         let dests = switch
             .dests
             .iter()
             .map(|(c, n)| self.state.const_to_bv(c).map(|c| (c, n)))
             .collect::<Result<Vec<(B::BV, &Name)>>>()?;
-        println!("got dests");
+        trace!("got dests");
         let feasible_dests: Vec<_> = dests
             .iter()
             .map(|(c, n)| {
@@ -2328,16 +2328,16 @@ where
             .filter(|(_, _, b)| *b)
             .map(|(c, n, _)| (c, n))
             .collect::<Vec<(&B::BV, &Name)>>();
-        println!("found feasible dests");
+        trace!("found feasible dests");
         if feasible_dests.is_empty() {
             // none of the dests are feasible, we will always end up in the default dest
             self.state
                 .cur_loc
                 .move_to_start_of_bb_by_name(&switch.default_dest);
-            println!("default dest");
+            trace!("default dest");
             self.symex_from_cur_loc_through_end_of_function()
         } else {
-            println!("in else");
+            trace!("in else");
             // make backtracking points for all but the first destination
             for (val, name) in feasible_dests.iter().skip(1) {
                 self.state
